@@ -100,6 +100,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 | `WATCH_DANGER_ONLY` | `0` | `1`=只有「危险」命令才弹手表,其余直接返回 `ask`(见下)。 |
 | `WATCH_DANGER_EXTRA` | — | 追加的危险正则(换行分隔,忽略大小写)。 |
 | `WATCH_DANGER_REGEX` | — | 单条正则,**整体替换**内置危险清单。 |
+| `WATCH_NONDANGER_DECISION` | `ask` | (danger-only 模式)非危险操作怎么办:`ask`(退回终端)、`allow`(自动放行,不弹手表也不在终端问)、`deny`。 |
 
 ---
 
@@ -116,6 +117,13 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 可用 `WATCH_DANGER_EXTRA` 追加,或用 `WATCH_DANGER_REGEX` 整体替换。
 
 > 开了 danger-only 后,要用危险命令测试(如 `rm -rf /tmp/x`)——普通的 `echo hello` 按设计**不会**弹通知。
+
+**自动驾驶 + 安全网。** 默认 danger-only 下,非危险操作走 `ask`(终端可能还会问)。如果你**根本不想碰终端**
+——"只有危险操作在手表上拦,其余全自动跑"——就把 `WATCH_DANGER_ONLY=1` 配上 `WATCH_NONDANGER_DECISION=allow`。
+这样非危险操作自动放行,只有命中危险清单的才弹手表。
+
+> ⚠️ 用 `WATCH_NONDANGER_DECISION=allow` 时,危险清单**没**逮到的操作会**无确认直接执行**。这时危险正则就是你
+> 唯一的关卡,按需扩充它(`WATCH_DANGER_EXTRA`)。
 
 ---
 

@@ -114,6 +114,7 @@ Lock your iPhone so the notification reaches the watch, tap **Allow**, and you s
 | `WATCH_DANGER_ONLY` | `0` | `1` = only "risky" commands ping the watch; everything else returns `ask` instantly (see below). |
 | `WATCH_DANGER_EXTRA` | — | Extra danger regexes to add (newline-separated), case-insensitive. |
 | `WATCH_DANGER_REGEX` | — | A single regex that **replaces** the built-in danger list entirely. |
+| `WATCH_NONDANGER_DECISION` | `ask` | (danger-only mode) what to do with non-risky ops: `ask` (defer to the terminal), `allow` (auto-run silently — no watch, no prompt), `deny`. |
 
 ---
 
@@ -132,6 +133,14 @@ The built-in danger list flags things like `rm -rf`, `sudo`, `git push --force`,
 
 > If you enable danger-only, test with a risky command (e.g. `rm -rf /tmp/x`) — a plain `echo hello`
 > won't trigger a notification by design.
+
+**Auto-pilot with a safety net.** By default, danger-only sends non-risky ops to `ask` (so the terminal
+may still prompt). If you'd rather *never* touch the terminal — "only risky ops gate on my watch,
+everything else just runs" — combine `WATCH_DANGER_ONLY=1` with `WATCH_NONDANGER_DECISION=allow`. Then
+non-risky operations are auto-approved silently and only danger-list matches buzz your watch.
+
+> ⚠️ With `WATCH_NONDANGER_DECISION=allow`, anything the danger list does **not** catch runs without any
+> confirmation. The danger regex is your only gate — review/extend it (`WATCH_DANGER_EXTRA`) to taste.
 
 ---
 

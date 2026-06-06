@@ -117,6 +117,15 @@ STREAM_READ_TIMEOUT = 60
 # This keeps routine commands quiet and only pings you for genuinely risky actions.
 DANGER_ONLY = os.environ.get("WATCH_DANGER_ONLY", "0").strip() == "1"
 
+# In danger-only mode, what to do with a NON-risky operation:
+#   ask (default) = defer to the agent's normal flow (terminal may still prompt you)
+#   allow         = auto-approve silently (no watch buzz, no terminal prompt) -> "only
+#                   risky ops gate on the watch, everything else just runs"
+#   deny          = block it
+NONDANGER_DECISION = os.environ.get("WATCH_NONDANGER_DECISION", "ask").strip().lower()
+if NONDANGER_DECISION not in ("allow", "deny", "ask"):
+    NONDANGER_DECISION = "ask"
+
 _DEFAULT_DANGER_PATTERNS = [
     r"\brm\s+-",                                       # rm with any flag (rm -rf, rm -r ...)
     r"\bsudo\b",
@@ -346,13 +355,18 @@ def main():
 
     desc = describe(tool_name, tool_input)
 
-    # In danger-only mode, let non-risky operations pass straight through (no watch).
+    # In danger-only mode, handle non-risky operations per NONDANGER_DECISION (no watch).
     if DANGER_ONLY:
         match_text = ""
         if isinstance(tool_input, dict):
             match_text = str(tool_input.get("command") or tool_input.get("file_path") or "")
         if not is_dangerous(match_text or desc):
-            emit("ask", "watch-approve: not flagged as risky; deferring to normal approval.")
+            if NONDANGER_DECISION == "allow":
+                emit("allow", "watch-approve: not risky; auto-approved (no watch).")
+            elif NONDANGER_DECISION == "deny":
+                emit("deny", "watch-approve: not risky; denied per config.")
+            else:
+                emit("ask", "watch-approve: not flagged as risky; deferring to normal approval.")
 
     opener = make_opener()
 
