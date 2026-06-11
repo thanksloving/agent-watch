@@ -48,10 +48,11 @@
 ### 📸 真机实拍
 
 <div align="center">
-  <img src="./assets/photos/photo-1.jpg" width="320" alt="Claude 要删文件夹,Apple Watch 上点批准">
-  <img src="./assets/photos/photo-2.jpg" width="320" alt="Codex 要 git push,Apple Watch 上点批准">
+  <img src="./assets/photos/photo-1.jpg" width="260" alt="Claude 要删文件夹,Apple Watch 上点批准">
+  <img src="./assets/photos/photo-2.jpg" width="260" alt="Codex 要 git push,Apple Watch 上点批准">
+  <img src="./assets/photos/photo-3.jpg" width="260" alt="任务已完成,Apple Watch 通知">
   <br>
-  <sub>左:Claude 要删文件夹,手表上批 · 右:Codex 要 git push,同一块表照单全收</sub>
+  <sub>左:Claude 要删文件夹,手表上批 · 中:Codex 要 git push,同一块表照单全收 · 右:跑完了,抬腕就知道</sub>
 </div>
 
 ---
