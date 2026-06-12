@@ -63,6 +63,15 @@ _load_env_file()
 PUSHCUT_KEY = os.environ.get("PUSHCUT_KEY", "").strip()
 PUSHCUT_NOTIF = os.environ.get("PUSHCUT_NOTIF", "claude").strip() or "claude"
 
+# 通知载体:pushcut(苹果,默认)/ ntfy(安卓、Wear OS、旧鸿蒙)。与审批 hook 共用同一套
+# 开关:ntfy 载体把完成提醒直接 publish 到 NTFY_NOTIFY_TOPIC(手机 ntfy app 订阅)。
+TRANSPORT = os.environ.get("WATCH_TRANSPORT", "pushcut").strip().lower()
+if TRANSPORT not in ("pushcut", "ntfy"):
+    TRANSPORT = "pushcut"
+NTFY_BASE = (os.environ.get("NTFY_BASE", "").strip() or "https://ntfy.sh/").rstrip("/") + "/"
+NTFY_NOTIFY_TOPIC = os.environ.get("NTFY_NOTIFY_TOPIC", "").strip()
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "").strip()
+
 # 代理:优先 HTTPS_PROXY,其次大小写/HTTP 变体,形如 http://127.0.0.1:7890
 PROXY = (
     os.environ.get("HTTPS_PROXY")
@@ -173,35 +182,49 @@ def make_opener():
     return urllib.request.build_opener(proxy_handler)
 
 
-def send_pushcut(opener, title, text, sound=None):
-    """经代理 POST 触发 Pushcut 通知(无 actions = 无按钮);瞬时网络/TLS 失败自动重试。
+def send_notification(opener, title, text, sound=None):
+    """按 WATCH_TRANSPORT 发一条纯提醒通知(无按钮);瞬时网络/TLS 失败自动重试。
 
-    sound:不传用 DONE_SOUND;限额/异常类通知传 LIMIT_SOUND 以示区别。
-    4xx(通知不存在=404、key 无效=401 等)是配置问题,重试无意义,直接 return。
+    sound:不传用 DONE_SOUND;限额/异常类通知传 LIMIT_SOUND 以示区别
+    (pushcut=提示音;ntfy 没有 per-message 声音,改为把优先级提到 urgent)。
+    4xx(通知不存在=404、key/token 无效=401 等)是配置问题,重试无意义,直接 return。
     """
     snd = (sound if sound is not None else DONE_SOUND).strip()
-    payload = {"title": title}
-    if text:
-        payload["text"] = text
-    if PUSHCUT_DEVICES:
-        payload["devices"] = PUSHCUT_DEVICES
-    if snd and snd.lower() != "none":
-        payload["sound"] = snd
-    if PUSHCUT_IMAGE and PUSHCUT_IMAGE.lower() != "none":
-        payload["image"] = PUSHCUT_IMAGE
-    if TIME_SENSITIVE:
-        payload["isTimeSensitive"] = True
-    # 关键:不带 actions 字段 -> 通知上没有任何按钮,纯展示、不需回复。
+    if TRANSPORT == "ntfy":
+        # ntfy 载体:publish 到通知 topic(JSON 格式,POST 到服务根)。
+        # 完成提醒给默认优先级(3),限额/异常给 urgent(5,息屏弹出+连续震动)。
+        payload = {
+            "topic": NTFY_NOTIFY_TOPIC,
+            "title": title,
+            "message": text or "(无详情)",
+            "priority": 5 if snd == LIMIT_SOUND else 3,
+        }
+        if PUSHCUT_IMAGE and PUSHCUT_IMAGE.lower() != "none":
+            payload["attach"] = PUSHCUT_IMAGE  # ntfy 的「附件 URL」= 通知配图
+        headers = {"Content-Type": "application/json"}
+        if NTFY_TOKEN:
+            headers["Authorization"] = "Bearer " + NTFY_TOKEN
+        url = NTFY_BASE
+    else:
+        payload = {"title": title}
+        if text:
+            payload["text"] = text
+        if PUSHCUT_DEVICES:
+            payload["devices"] = PUSHCUT_DEVICES
+        if snd and snd.lower() != "none":
+            payload["sound"] = snd
+        if PUSHCUT_IMAGE and PUSHCUT_IMAGE.lower() != "none":
+            payload["image"] = PUSHCUT_IMAGE
+        if TIME_SENSITIVE:
+            payload["isTimeSensitive"] = True
+        headers = {"API-Key": PUSHCUT_KEY, "Content-Type": "application/json"}
+        url = PUSHCUT_URL
+    # 关键:都不带 actions 字段 -> 通知上没有任何按钮,纯展示、不需回复。
     body = json.dumps(payload).encode("utf-8")
 
     for attempt in range(PUSHCUT_RETRIES):
         try:
-            req = urllib.request.Request(
-                PUSHCUT_URL,
-                data=body,
-                method="POST",
-                headers={"API-Key": PUSHCUT_KEY, "Content-Type": "application/json"},
-            )
+            req = urllib.request.Request(url, data=body, method="POST", headers=headers)
             with opener.open(req, timeout=PUSHCUT_TIMEOUT) as resp:
                 resp.read()
             return
@@ -375,7 +398,7 @@ def main():
         data = {}
 
     # 缺关键配置就静默退出(完成提醒是锦上添花,绝不打断 agent)。
-    if not PUSHCUT_KEY:
+    if (not NTFY_NOTIFY_TOPIC) if TRANSPORT == "ntfy" else (not PUSHCUT_KEY):
         return
 
     title, text, sound = build_notification(data)
@@ -385,7 +408,7 @@ def main():
         folder = cwd_label(data)
         if folder:
             text = (text + "\n📁\u00a0" + folder) if text else "📁\u00a0" + folder
-    send_pushcut(make_opener(), title, text, sound)
+    send_notification(make_opener(), title, text, sound)
     # 不输出任何 JSON、正常 exit 0 -> agent 正常结束,不会触发 Stop 循环。
 
 

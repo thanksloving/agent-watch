@@ -6,6 +6,7 @@
 
 让 **Claude Code** 和 **Codex** 的危险操作推送到你的 **Apple Watch / iPhone** 上审批,
 任务完成自动通知 —— 全程不用回终端。
+**安卓 / Wear OS / 鸿蒙(兼容模式)同样支持**:一个开关切到 ntfy 载体,连 Pushcut 都不用装(见「不止苹果」一节)。
 
 [![CI](https://github.com/ghy196830-del/agent-watch-approve/actions/workflows/ci.yml/badge.svg)](https://github.com/ghy196830-del/agent-watch-approve/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
@@ -64,6 +65,7 @@
 5. **接线**:`python watch_approve.py --print-claude-config` / `--print-codex-config` 打印已转义好绝对路径的配置片段,粘进 `~/.claude/settings.json` / `~/.codex/hooks.json`,重启 agent,跑条危险命令测试。
 
 每步细节见下文「十分钟上手」;哪里不顺,先跑 `--doctor`,再看「排错」。
+(**安卓 / Wear OS 用户**:第 1 步换成装 ntfy app,免 Pushcut,走「📱 不止苹果」一节。)
 
 ## 它解决什么问题
 
@@ -277,9 +279,12 @@ Claude 有时不是要批准,而是抛一道**多选决策题**(`AskUserQuestion
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `PUSHCUT_KEY` | — | **必填。** Pushcut API key |
+| `PUSHCUT_KEY` | — | **必填(pushcut 载体)。** Pushcut API key |
 | `NTFY_TOPIC` | — | **必填。** 回传通道 topic(就是密码,取长随机) |
 | `PUSHCUT_NOTIF` | `claude` | Pushcut 里那条通知的名字 |
+| `WATCH_TRANSPORT` | `pushcut` | 通知载体:`pushcut`(苹果)/ `ntfy`(安卓/Wear OS,见「不止苹果」) |
+| `NTFY_NOTIFY_TOPIC` | — | **必填(ntfy 载体)。** 通知频道 topic,手机 ntfy app 订阅它 |
+| `NTFY_TOKEN` | — | 自建带鉴权 ntfy 的令牌(publish/订阅/按钮全带上) |
 | `HTTPS_PROXY` | — | 出网代理,如 `http://127.0.0.1:7890`(回退 `HTTP_PROXY`) |
 | `WATCH_AGENT` | `claude` | `claude` / `codex`;命令行 `--agent` 优先级更高 |
 | `WATCH_ENV_FILE` | 脚本旁的 `watch.env` | 兜底配置文件路径 |
@@ -345,6 +350,53 @@ Claude 有时不是要批准,而是抛一道**多选决策题**(`AskUserQuestion
   此时 Pushcut API 照样返回「成功」但什么都到不了。重开即恢复(顺带让手表重新同步)。
 - 手表上动图只显示静帧(watchOS 限制);iPhone 展开通知能看到螃蟹动起来。
 
+## 📱 不止苹果:安卓 / Wear OS / 鸿蒙
+
+整条链路里只有 Pushcut 是苹果专属的。安卓上它的角色由 **ntfy 自己兼任**——ntfy 官方
+Android app 原生支持「http 后台请求」型通知按钮,和 Pushcut 的后台 web 请求完全等价,
+所以**一个服务全包,不需要第二个账号**:
+
+```
+hook → publish 到 ntfy 通知 topic(带按钮)→ 手机弹通知 → 点按钮后台 GET 回执 topic → hook 读到
+```
+
+### 安卓接入(3 步)
+
+1. 手机装 **ntfy app**([Google Play](https://play.google.com/store/apps/details?id=io.heckel.ntfy) /
+   [F-Droid](https://f-droid.org/packages/io.heckel.ntfy/)——F-Droid 版走 WebSocket 直连,
+   **不依赖 Google 服务**,无 GMS 的国产机/华为机用它);
+2. `watch.env` 里加两行(`PUSHCUT_*` 全部不用填):
+   ```
+   WATCH_TRANSPORT=ntfy
+   NTFY_NOTIFY_TOPIC=<又一个长随机串,和 NTFY_TOPIC 不同>
+   ```
+3. app 里订阅 `NTFY_NOTIFY_TOPIC` 这个 topic,然后 `python watch_approve.py --doctor` 自检
+   (会发条测试通知到手机)。
+
+**务必做的两件事**:app 设置里开「即时推送」(instant delivery,常驻前台服务);把 ntfy
+加进电池白名单/锁后台——国产 ROM(华为/小米/OPPO)杀后台狠,被杀了就等于 Pushcut 的
+「token 失效」坑。通知的声音/震动在 app 里按 topic 设置(审批通知以 urgent 优先级发出,
+息屏也会弹出+连续震动)。
+
+### 手表与鸿蒙
+
+| 设备 | 支持程度 |
+|------|---------|
+| **Wear OS**(Pixel/Galaxy/OPPO Watch…) | ✅ 手机通知**连按钮一起**镜像到手表,抬腕审批 |
+| **鸿蒙 ≤4.x(兼容安卓)** | ✅ 装 F-Droid 版 ntfy 即可,同上 |
+| **华为手表**(GT/Watch 系列) | ⚠️ 只镜像通知文本,按钮过不去——手表看见、手机上批 |
+| **鸿蒙 NEXT(纯血,不能跑安卓 app)** | ❌ 无 ntfy 客户端。兜底:用 Server酱 等把审批推成**微信消息**,正文放两个链接(指向 ntfy 的 `/publish?message=allow|deny` GET URL),点链接即完成审批。欢迎社区 PR 原生 app |
+
+### ntfy 载体的细节差异
+
+- **按钮上限 3 个**(ntfy 协议限制):审批的 允许/拒绝/终端查看 正好;选择题 2 个选项时带
+  「在终端查看」、3 个选项时挤掉它(超时仍回终端)、4 个选项放不下→手机提醒一声后回终端;
+- **自建 ntfy + 鉴权完整可用**(比苹果侧更强):设 `NTFY_TOKEN` 后 publish/订阅/按钮回发
+  全带 `Authorization: Bearer`,ntfy app 也支持账号订阅——Pushcut 按钮带不了 header,
+  苹果侧做不到这一点;
+- 配图以 ntfy 附件形式展示;`PUSHCUT_SOUND`/`PUSHCUT_DEVICES`/Time-Sensitive 是苹果侧
+  概念,ntfy 载体下忽略。
+
 ## 排错
 
 | 现象 | 原因 / 处理 |
@@ -362,6 +414,8 @@ Claude 有时不是要批准,而是抛一道**多选决策题**(`AskUserQuestion
 | 不震动 | `PUSHCUT_SOUND=default`(或 `vibrateOnly`) |
 | Windows 手动测试中文变 `???` | PowerShell 管道编码锅,不是 hook 的问题;真实运行不受影响。测试时用 UTF-8 文件或环境变量传值 |
 | 多窗口同时等批,点一个全放行了 | 升级到带 `WATCH_UNIQUE_TOPIC` 的版本(默认开);静态按钮模式(`PUSHCUT_DYNAMIC_ACTIONS=0`)不支持隔离,多窗口请用动态按钮 |
+| (安卓)ntfy 通知收不到/迟到 | app 里开「即时推送」+ 把 ntfy 加电池白名单(国产 ROM 杀后台);确认订阅的是 `NTFY_NOTIFY_TOPIC` 而不是回执 topic |
+| (安卓)选择题按钮缺了 | ntfy 单条通知限 3 个按钮:3 选项时「在终端查看」被挤掉(超时仍回终端),4 选项整体回终端,符合设计 |
 | 选择题没出「方案X」按钮 | 多问题/多选题按设计回终端(通知只提醒);单问题单选才带按钮。整个功能可用 `WATCH_ASK_QUESTIONS=0` 关闭 |
 
 任何失败路径都返回「退回正常审批」,agent 永远不会因此卡死。

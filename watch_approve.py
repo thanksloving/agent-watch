@@ -3,13 +3,16 @@
 """
 Claude Code / Codex CLI PreToolUse hook: 手表远程批准 (watch remote approval).
 
-链路:
+链路(默认 pushcut 载体,苹果设备):
   stdin(JSON)
     -> 经机场代理 POST 触发 Pushcut 通知
     -> 我在 iPhone / Apple Watch 上点 Allow / Deny
     -> Pushcut 云端后台 POST 到 ntfy 的 topic (allow / deny)
     -> 本脚本经代理从 ntfy stream 读到结果
     -> 输出 permissionDecision 给 Claude Code
+WATCH_TRANSPORT=ntfy 载体(安卓 / Wear OS / 旧鸿蒙):
+  通知不走 Pushcut,直接 publish 到 ntfy 的 NTFY_NOTIFY_TOPIC(手机 ntfy app 订阅),
+  按钮 = ntfy 原生 http action;回执链路与上面完全相同。
 
 设计原则:
   * 只用 Python 3 标准库,不引第三方依赖。
@@ -116,6 +119,30 @@ if TIMEOUT_DECISION not in ("allow", "deny", "ask"):
 #             按钮和它指向的 ntfy URL 都由 hook 在 API 调用里带上。
 # "0":不注入,改用你在 app 里手动配好的 action。
 DYNAMIC_ACTIONS = os.environ.get("PUSHCUT_DYNAMIC_ACTIONS", "1").strip() != "0"
+
+# ---------- 通知载体:pushcut(苹果,默认)/ ntfy(安卓、Wear OS、旧鸿蒙) ----------
+# pushcut:经 Pushcut 云推到 iPhone / Apple Watch(动态按钮需 Pro)。
+# ntfy:   不需要 Pushcut——把「带按钮的通知」直接 publish 到 NTFY_NOTIFY_TOPIC,
+#         手机装 ntfy app 订阅它;按钮是 ntfy 原生 http action(后台 GET 回执),
+#         Wear OS 会连按钮一起镜像到手表。回执链路与 pushcut 完全相同。
+TRANSPORT = os.environ.get("WATCH_TRANSPORT", "pushcut").strip().lower()
+if TRANSPORT not in ("pushcut", "ntfy"):
+    TRANSPORT = "pushcut"
+
+# ntfy 载体的「通知 topic」= 手机 app 订阅的频道。它本身就是密码(取长随机串),
+# 且必须与回执 NTFY_TOPIC 不同,否则按钮回执会混进通知频道、手机上凭空多出怪消息。
+NTFY_NOTIFY_TOPIC = os.environ.get("NTFY_NOTIFY_TOPIC", "").strip()
+
+# 自建带鉴权 ntfy 的访问令牌:publish / 订阅 / 按钮回发全都带 Authorization: Bearer。
+# 这是 ntfy 载体独有的能力——Pushcut 的按钮带不了自定义 header(见 README 安全节)。
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "").strip()
+
+# 按钮是否动态注入:pushcut 受 PUSHCUT_DYNAMIC_ACTIONS 控制(=0 用 app 手配的静态按钮);
+# ntfy 没有「app 手配按钮」的概念,恒为动态。
+DYNAMIC = DYNAMIC_ACTIONS if TRANSPORT == "pushcut" else True
+
+# 单条通知的按钮上限:ntfy 协议限 3 个;Pushcut 实测 5 个(4 选项+终端查看)没问题。
+_MAX_ACTIONS = 3 if TRANSPORT == "ntfy" else 5
 
 # 指定通知发给哪些 Pushcut 设备(设备名见 GET /v1/devices)。逗号分隔,例如 "iPhone,watch"。
 # 留空 = 用 Pushcut 默认(发给所有设备)。直接点名 watch 可绕过「iPhone 没锁屏就不镜像到表」
@@ -248,6 +275,17 @@ STREAM_READ_TIMEOUT = 60
 #   * Codex 的 PermissionRequest      -> decision.behavior 格式(Codex 专属事件,只在
 #     Codex 自己要弹审批时触发;hook 不回应 = 走 Codex 正常审批流程,等同 ask)
 HOOK_EVENT = ""
+
+
+def missing_config():
+    """关键配置是否缺失(按载体分):缺了只能退回终端,绝不报错卡住。"""
+    if TRANSPORT == "ntfy":
+        return not NTFY_NOTIFY_TOPIC or not NTFY_TOPIC
+    return not PUSHCUT_KEY or not NTFY_TOPIC
+
+
+_MISSING_MSG = ("缺少 NTFY_NOTIFY_TOPIC 或 NTFY_TOPIC" if TRANSPORT == "ntfy"
+                else "缺少 PUSHCUT_KEY 或 NTFY_TOPIC")
 
 
 # ---------- 危险命令过滤:只把"真要命"的操作推到手表 ----------
@@ -618,34 +656,66 @@ def make_reply_topic():
     """生成本次审批的回执 topic:多窗口下每次请求独立,互不串台。
 
     动态按钮 + 未关闭 WATCH_UNIQUE_TOPIC 时 = 基础 topic + "-" + 12 位随机十六进制;
-    否则(静态按钮指向固定 topic / 显式要求共享)退回基础 topic,行为与旧版完全一致。
+    否则(Pushcut 静态按钮指向固定 topic / 显式要求共享)退回基础 topic,与旧版一致。
     """
-    if UNIQUE_TOPIC and DYNAMIC_ACTIONS:
+    if UNIQUE_TOPIC and DYNAMIC:
         return NTFY_TOPIC + "-" + os.urandom(6).hex()
     return NTFY_TOPIC
 
 
-def build_actions(reply_topic):
-    """动态生成审批按钮:✅ 允许 / ❌ 拒绝(+ 可选 🖥️ 终端查看),用「后台 web 请求」
-    GET 方式 publish 到 ntfy 的 reply_topic(本次审批专属 topic,见 make_reply_topic)。
+# ---------- 按钮:载体无关的 (label, 回执消息) 对 + 各载体的渲染 ----------
+def _publish_url(reply_topic, msg):
+    """按钮按下后要请求的 URL:GET publish 到本次审批的回执 topic。"""
+    return NTFY_BASE + urllib.parse.quote(reply_topic, safe="") + "/publish?message=" + msg
+
+
+def default_buttons():
+    """审批按钮组:✅ 允许 / ❌ 拒绝(+ 可选 🖥️ 终端查看)。"""
+    btns = [("✅ 允许", "allow"), ("❌ 拒绝", "deny")]
+    if TERMINAL_BUTTON:
+        # 第三个按钮:既不放行也不拒绝,退回终端审批(Claude=ask,Codex=原生弹窗)。
+        btns.append(("🖥️ 终端查看", "term"))
+    return btns
+
+
+def question_buttons(n):
+    """选择题按钮组:方案A..(+ 放得下时的「🖥️ 在终端查看」)。
+
+    ntfy 限单条通知 3 个按钮:2 选项 = A/B/在终端查看 正好;3 选项 = A/B/C(挤掉
+    「在终端查看」,超时兜底仍会回终端);4 选项放不下,handle_question 会按复杂题处理。
+    Pushcut 无此限制(实测 5 个没问题),永远带「在终端查看」。
+    """
+    btns = [("方案" + _OPT_LETTERS[i], "opt" + _OPT_LETTERS[i]) for i in range(n)]
+    if len(btns) < _MAX_ACTIONS:
+        btns.append(("🖥️ 在终端查看", "term"))
+    return btns
+
+
+def _pushcut_actions(reply_topic, buttons):
+    """(label, msg) -> Pushcut 动态 action。
 
     关键:必须用 urlBackgroundOptions(后台 web 请求),不能用普通 url(=打开链接/打开
     app)——watchOS 不支持「打开 app / 跑快捷指令」类动作,只支持后台 web 请求。
-    用 GET(ntfy 支持 /publish?message=xxx)可避开 urlBackgroundOptions 里 httpBody
-    偶发不生效的问题。返回 None 表示不注入(改用 app 里手配的 action)。
+    用 GET(ntfy 支持 /publish?message=xxx)可避开 httpBody 偶发不生效的问题。
     """
-    if not DYNAMIC_ACTIONS or not reply_topic:
-        return None
-    base = NTFY_BASE + urllib.parse.quote(reply_topic, safe="") + "/publish?message="
-    acts = [
-        {"name": "✅ 允许", "url": base + "allow", "urlBackgroundOptions": {"httpMethod": "GET"}},
-        {"name": "❌ 拒绝", "url": base + "deny", "urlBackgroundOptions": {"httpMethod": "GET"}},
+    return [
+        {"name": lab, "url": _publish_url(reply_topic, msg),
+         "urlBackgroundOptions": {"httpMethod": "GET"}}
+        for lab, msg in buttons
     ]
-    if TERMINAL_BUTTON:
-        # 第三个按钮:既不放行也不拒绝,退回终端审批(Claude=ask,Codex=原生弹窗)。
-        acts.append(
-            {"name": "🖥️ 终端查看", "url": base + "term", "urlBackgroundOptions": {"httpMethod": "GET"}}
-        )
+
+
+def _ntfy_actions(reply_topic, buttons):
+    """(label, msg) -> ntfy 原生 http action(安卓通知按钮:后台 GET,点完自动收起通知;
+    Wear OS 镜像通知时按钮也一起带上)。自建带鉴权时按钮请求带 Bearer。
+    只取前 3 个(ntfy 协议上限;按钮组在上游已按 _MAX_ACTIONS 控制,这里是兜底)。"""
+    acts = []
+    for lab, msg in buttons[:3]:
+        a = {"action": "http", "label": lab, "url": _publish_url(reply_topic, msg),
+             "method": "GET", "clear": True}
+        if NTFY_TOKEN:
+            a["headers"] = {"Authorization": "Bearer " + NTFY_TOKEN}
+        acts.append(a)
     return acts
 
 
@@ -698,46 +768,51 @@ def question_body(q):
     return "\n".join(lines)
 
 
-def build_question_actions(reply_topic, n):
-    """选择题按钮:方案A..方案D + 「🖥️ 在终端查看」,同样全是后台 web 请求(watchOS 限制)。
+def _deliver(opener, url, body, headers, retries, timeout):
+    """POST 一段 JSON;对瞬时网络/TLS 失败自动重试。
+    4xx(429 限流除外)是配置错误,重试无意义,立刻上抛 -> 上层 fail-safe 成 ask。"""
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+            with opener.open(req, timeout=timeout) as resp:
+                resp.read()
+            return
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500 and e.code != 429:
+                raise
+            last = e
+        except Exception as e:
+            last = e
+        if attempt < retries - 1:
+            time.sleep(0.3)
+    if last is not None:
+        raise last
 
-    点「方案X」后台 publish "optX" 到回执 topic;点「在终端查看」publish "term"
-    (= 放行,让题目在终端正常弹出,适合人就在电脑前的场景)。
-    """
-    base = NTFY_BASE + urllib.parse.quote(reply_topic, safe="") + "/publish?message="
-    acts = [
-        {
-            "name": "方案" + _OPT_LETTERS[i],
-            "url": base + "opt" + _OPT_LETTERS[i],
-            "urlBackgroundOptions": {"httpMethod": "GET"},
-        }
-        for i in range(n)
-    ]
-    acts.append(
-        {"name": "🖥️ 在终端查看", "url": base + "term", "urlBackgroundOptions": {"httpMethod": "GET"}}
-    )
-    return acts
 
+def send_notification(opener, title, text, with_actions=True, retries=None, reply_topic=None,
+                      buttons=None, sound=None):
+    """按 WATCH_TRANSPORT 把一条通知送出去(带按钮或纯提醒)。
 
-def send_pushcut(opener, title, text, with_actions=True, retries=None, reply_topic=None,
-                 actions=None, sound=None):
-    """经代理 POST 触发 Pushcut 通知;对瞬时网络/TLS 失败自动重试。
-
-    with_actions=False:不带 Allow/Deny 按钮,纯提醒(用于「去终端确认」这种无需回执的通知)。
+    with_actions=False:纯提醒,不带按钮(「去终端确认」/ 完成提醒这类无需回执的通知)。
+    buttons:显式按钮组([(label, 回执消息)],选择题用),非 None 时优先于 with_actions。
     reply_topic:按钮 publish 的回执 topic(多窗口下本次审批专属;缺省用基础 topic)。
-    retries:本次最多尝试几次(默认用 PUSHCUT_RETRIES);提醒类通知传小一点,避免拖慢终端。
-    actions:直接指定按钮列表(选择题的「方案A/B/...」),非 None 时优先于 with_actions。
-    sound:覆盖本条通知的声音(选择题用 question 音);None = 用全局 PUSHCUT_SOUND。
-    4xx(如通知不存在=404、key 无效=401)是配置问题,重试也没用,直接抛出 ->
-    上层会 fail-safe 成 ask。
+    retries:本次最多尝试几次(默认 PUSHCUT_RETRIES);提醒类通知传小一点,避免拖慢终端。
+    sound:覆盖本条通知的声音(仅 pushcut;ntfy 的声音/震动在 app 里按 topic 配)。
     """
+    btns = buttons if buttons is not None else (default_buttons() if with_actions else None)
+    n = retries or PUSHCUT_RETRIES
+    if TRANSPORT == "ntfy":
+        _send_ntfy(opener, title, text, btns, n, reply_topic)
+    else:
+        _send_pushcut(opener, title, text, btns, n, reply_topic, sound)
+
+
+def _send_pushcut(opener, title, text, buttons, retries, reply_topic, sound):
+    """Pushcut 载体:POST 到 Pushcut API,推到 iPhone / Apple Watch。"""
     payload = {"title": title, "text": text}
-    if actions is not None:
-        payload["actions"] = actions
-    elif with_actions:
-        acts = build_actions(reply_topic or NTFY_TOPIC)
-        if acts:
-            payload["actions"] = acts
+    if buttons and DYNAMIC:
+        payload["actions"] = _pushcut_actions(reply_topic or NTFY_TOPIC, buttons)
     if PUSHCUT_DEVICES:
         payload["devices"] = PUSHCUT_DEVICES
     snd = sound if sound is not None else PUSHCUT_SOUND
@@ -747,32 +822,33 @@ def send_pushcut(opener, title, text, with_actions=True, retries=None, reply_top
         payload["image"] = PUSHCUT_IMAGE
     if TIME_SENSITIVE:
         payload["isTimeSensitive"] = True
-    body = json.dumps(payload).encode("utf-8")
+    _deliver(opener, PUSHCUT_URL, json.dumps(payload).encode("utf-8"),
+             {"API-Key": PUSHCUT_KEY, "Content-Type": "application/json"},
+             retries, PUSHCUT_TIMEOUT)
 
-    last = None
-    n = retries or PUSHCUT_RETRIES
-    for attempt in range(n):
-        try:
-            req = urllib.request.Request(
-                PUSHCUT_URL,
-                data=body,
-                method="POST",
-                headers={"API-Key": PUSHCUT_KEY, "Content-Type": "application/json"},
-            )
-            with opener.open(req, timeout=PUSHCUT_TIMEOUT) as resp:
-                resp.read()
-            return
-        except urllib.error.HTTPError as e:
-            # 4xx(429 限流除外)是配置错误,重试无意义,立刻上抛
-            if 400 <= e.code < 500 and e.code != 429:
-                raise
-            last = e
-        except Exception as e:
-            last = e
-        if attempt < n - 1:
-            time.sleep(0.3)
-    if last is not None:
-        raise last
+
+def _send_ntfy(opener, title, text, buttons, retries, reply_topic):
+    """ntfy 载体:把通知 publish 到 NTFY_NOTIFY_TOPIC(JSON 格式,POST 到服务根)。
+
+    手机端 ntfy app 订阅该 topic 即收到;按钮 = 原生 http action。优先级:带按钮的
+    审批/选择题给 5(urgent,息屏弹出+连续震动),纯提醒给 4(high)。
+    声音/震动样式在 ntfy app 里按 topic 设置,服务端不带 sound 字段。
+    """
+    payload = {
+        "topic": NTFY_NOTIFY_TOPIC,
+        "title": title,
+        "message": text or "(无详情)",
+        "priority": 5 if buttons else 4,
+    }
+    if buttons:
+        payload["actions"] = _ntfy_actions(reply_topic or NTFY_TOPIC, buttons)
+    if PUSHCUT_IMAGE and PUSHCUT_IMAGE.lower() != "none":
+        payload["attach"] = PUSHCUT_IMAGE  # ntfy 的「附件 URL」= 通知配图
+    headers = {"Content-Type": "application/json"}
+    if NTFY_TOKEN:
+        headers["Authorization"] = "Bearer " + NTFY_TOKEN
+    _deliver(opener, NTFY_BASE, json.dumps(payload).encode("utf-8"),
+             headers, retries, PUSHCUT_TIMEOUT)
 
 
 def wait_for_decision(opener, since_ts, deadline, topic=None, tokens=None):
@@ -794,7 +870,10 @@ def wait_for_decision(opener, since_ts, deadline, topic=None, tokens=None):
     )
     while time.monotonic() < deadline:
         try:
-            resp = opener.open(url, timeout=STREAM_READ_TIMEOUT)
+            req = urllib.request.Request(url)
+            if NTFY_TOKEN:
+                req.add_header("Authorization", "Bearer " + NTFY_TOKEN)
+            resp = opener.open(req, timeout=STREAM_READ_TIMEOUT)
         except Exception:
             time.sleep(1)  # 打开失败,稍后重连(不超过 deadline)
             continue
@@ -869,8 +948,8 @@ def handle_question(data, tool_input):
     (不带 updatedInput),题目照常在终端弹出 —— 对这个工具 allow 永远无害,
     它只是让终端选项框正常出现。
     """
-    if not PUSHCUT_KEY or not NTFY_TOPIC:
-        emit("allow", "watch-approve: 缺少 PUSHCUT_KEY 或 NTFY_TOPIC,选择题改在终端弹出。")
+    if missing_config():
+        emit("allow", "watch-approve: %s,选择题改在终端弹出。" % _MISSING_MSG)
 
     q = parse_question(tool_input)
     folder = cwd_label(data) if SHOW_CWD else ""
@@ -878,8 +957,9 @@ def handle_question(data, tool_input):
     suffix = ("\n📁\u00a0" + folder) if folder else ""
     opener = make_opener()
 
-    # 复杂题型(多问题 / 多选)或没开动态按钮:手表只提醒一声,选择回终端做。
-    if q is None or not DYNAMIC_ACTIONS:
+    # 复杂题型(多问题 / 多选 / 选项多到按钮放不下——ntfy 限 3 个)或没开动态按钮:
+    # 手机/手表只提醒一声,选择回终端做。
+    if q is None or not DYNAMIC or len(q["labels"]) > _MAX_ACTIONS:
         first = ""
         try:
             first = " ".join(str(tool_input["questions"][0]["question"]).split())
@@ -888,14 +968,14 @@ def handle_question(data, tool_input):
         if len(first) > DESC_MAX:
             first = first[: DESC_MAX - 1] + "…"
         try:
-            send_pushcut(
+            send_notification(
                 opener, QUESTION_TITLE,
                 "🖥️ 选项较复杂,请到终端选择" + (("\n" + first) if first else "") + suffix,
                 with_actions=False, retries=5, sound=QUESTION_SOUND,
             )
         except Exception:
             pass
-        emit("allow", "watch-approve: 选择题型较复杂(多问题/多选),已提醒手表,请在终端选择。")
+        emit("allow", "watch-approve: 选择题型较复杂(多问题/多选/选项过多),已提醒手表,请在终端选择。")
 
     # 单问题单选:推「方案A/B/.../在终端查看」按钮,等回执。
     reply_topic = make_reply_topic()
@@ -903,10 +983,10 @@ def handle_question(data, tool_input):
     t0 = int(time.time())
     deadline = time.monotonic() + APPROVE_WAIT
     try:
-        send_pushcut(
+        send_notification(
             opener, QUESTION_TITLE, question_body(q) + suffix,
             reply_topic=reply_topic, sound=QUESTION_SOUND,
-            actions=build_question_actions(reply_topic, len(q["labels"])),
+            buttons=question_buttons(len(q["labels"])),
         )
     except Exception:
         emit("allow", "watch-approve: 选择题推送手表失败,改在终端弹出。")
@@ -968,8 +1048,8 @@ def main():
         handle_question(data, tool_input)  # 内部必 emit,不会返回
 
     # 2) 关键配置缺失 -> ask 退化(不报错卡住)
-    if not PUSHCUT_KEY or not NTFY_TOPIC:
-        emit("ask", "watch-approve: 缺少 PUSHCUT_KEY 或 NTFY_TOPIC,退回正常审批。")
+    if missing_config():
+        emit("ask", "watch-approve: %s,退回正常审批。" % _MISSING_MSG)
 
     desc = describe(tool_name, tool_input)
 
@@ -994,7 +1074,7 @@ def main():
     #    重试数压到 5(默认 12 会拖慢终端弹窗出现);推送失败也吞掉,绝不卡住。
     if (not is_perm_request) and is_terminal_forced(tool_name, tool_input):
         try:
-            send_pushcut(make_opener(), "⚠️ 需去终端确认", desc, with_actions=False, retries=5)
+            send_notification(make_opener(), "⚠️ 需去终端确认", desc, with_actions=False, retries=5)
         except Exception:
             pass
         emit("ask", "watch-approve: 该操作会被 Claude Code 强制要求终端确认,已推提醒到手表/手机。")
@@ -1036,8 +1116,11 @@ def main():
     title = _PRESET["title"]
     text = desc if desc else "(无详情)"
     try:
-        send_pushcut(opener, title, text, reply_topic=reply_topic)
+        send_notification(opener, title, text, reply_topic=reply_topic)
     except urllib.error.HTTPError as e:
+        if TRANSPORT == "ntfy":
+            hint = "(token 无效/无权限?)" if e.code in (401, 403) else ""
+            emit("ask", "watch-approve: ntfy 返回 HTTP %s%s,退回正常审批。" % (e.code, hint))
         hint = ""
         if e.code == 404:
             hint = "(通知 '%s' 不存在?去 Pushcut app 建一条同名通知)" % PUSHCUT_NOTIF
@@ -1047,7 +1130,7 @@ def main():
     except Exception as e:
         emit(
             "ask",
-            "watch-approve: 推送 Pushcut 失败(%s,可能是代理/网络),退回正常审批。"
+            "watch-approve: 推送通知失败(%s,可能是代理/网络),退回正常审批。"
             % type(e).__name__,
         )
 
@@ -1113,7 +1196,7 @@ def run_doctor():
             fails[0] += 1
         _say("[%s] %s" % (level, text))
 
-    _say("== watch-approve 自检 (agent=%s) ==" % AGENT)
+    _say("== watch-approve 自检 (agent=%s, transport=%s) ==" % (AGENT, TRANSPORT))
 
     v = sys.version_info
     chk("OK" if v >= (3, 6) else "FAIL", "Python %d.%d.%d" % (v[0], v[1], v[2]))
@@ -1123,7 +1206,20 @@ def run_doctor():
     else:
         chk("WARN", "未读到 watch.env(找过:%s)——只用进程环境变量" % _ENV_FILE_PATH)
 
-    if not PUSHCUT_KEY:
+    if TRANSPORT == "ntfy":
+        if not NTFY_NOTIFY_TOPIC:
+            chk("FAIL", "NTFY_NOTIFY_TOPIC 缺失(ntfy 载体的通知频道,手机 app 订阅它)")
+        elif "REPLACE_WITH" in NTFY_NOTIFY_TOPIC.upper():
+            chk("FAIL", "NTFY_NOTIFY_TOPIC 还是示例占位符,没填真实 topic")
+        elif NTFY_NOTIFY_TOPIC == NTFY_TOPIC:
+            chk("FAIL", "NTFY_NOTIFY_TOPIC 和 NTFY_TOPIC 相同:通知频道和回执频道必须分开")
+        elif len(NTFY_NOTIFY_TOPIC) < 12:
+            chk("WARN", "NTFY_NOTIFY_TOPIC 只有 %d 字符:它就是密码,建议 16+ 位随机串"
+                % len(NTFY_NOTIFY_TOPIC))
+        else:
+            chk("OK", "NTFY_NOTIFY_TOPIC 已配置(%s)" % _mask_secret(NTFY_NOTIFY_TOPIC))
+        chk("OK", "NTFY_TOKEN:%s" % ("已配置(自建鉴权)" if NTFY_TOKEN else "未配置(公共 ntfy.sh 不需要)"))
+    elif not PUSHCUT_KEY:
         chk("FAIL", "PUSHCUT_KEY 缺失(Pushcut app -> Account -> API 获取)")
     elif "REPLACE_WITH" in PUSHCUT_KEY.upper():
         chk("FAIL", "PUSHCUT_KEY 还是示例占位符,没填真实 key")
@@ -1139,7 +1235,8 @@ def run_doctor():
     else:
         chk("OK", "NTFY_TOPIC 已配置(%s)" % _mask_secret(NTFY_TOPIC))
 
-    chk("OK", "PUSHCUT_NOTIF=%s" % PUSHCUT_NOTIF)
+    if TRANSPORT == "pushcut":
+        chk("OK", "PUSHCUT_NOTIF=%s" % PUSHCUT_NOTIF)
     if PROXY:
         chk("OK", "代理:%s" % PROXY)
     else:
@@ -1151,7 +1248,7 @@ def run_doctor():
         chk("OK", "APPROVE_WAIT=%ds(小于示例 hook timeout 300s)" % APPROVE_WAIT)
 
     chk("OK", "模式:danger_only=%s nondanger=%s 动态按钮=%s 独立回执topic=%s 终端查看按钮=%s"
-        % (DANGER_ONLY, NONDANGER_DECISION, DYNAMIC_ACTIONS, UNIQUE_TOPIC, TERMINAL_BUTTON))
+        % (DANGER_ONLY, NONDANGER_DECISION, DYNAMIC, UNIQUE_TOPIC, TERMINAL_BUTTON))
     if _SELF_DIR:
         chk("OK", "脚本自身目录已受保护:%s(WATCH_PROTECT_SELF=0 可关)" % _SELF_DIR)
     else:
@@ -1159,60 +1256,68 @@ def run_doctor():
     if PROTECT_PATHS:
         chk("OK", "额外受保护路径子串:%s" % ",".join(PROTECT_PATHS))
 
-    if not PUSHCUT_KEY or not NTFY_TOPIC:
+    if missing_config():
         _say("-- 关键配置缺失,跳过网络检查 --")
         _say("== 结果:%d 项失败,按上面 [FAIL] 逐条补齐 ==" % fails[0])
         return 1
 
     opener = make_opener()
 
-    # Pushcut:key 是否有效 + 账号真实设备名(PUSHCUT_DEVICES 名字不对,发通知会 400)
-    device_names = []
-    try:
-        devs = _doctor_get_json(opener, "https://api.pushcut.io/v1/devices")
-        for d in devs if isinstance(devs, list) else []:
-            n = (d.get("id") or d.get("name")) if isinstance(d, dict) else None
-            device_names.append(str(n if n else d))
-        chk("OK", "Pushcut API 连通,账号设备:%s" % (", ".join(device_names) or "(无)"))
-    except urllib.error.HTTPError as e:
-        chk("FAIL", "Pushcut API 返回 HTTP %d%s"
-            % (e.code, "(PUSHCUT_KEY 无效?)" if e.code in (401, 403) else ""))
-    except Exception as e:
-        chk("FAIL", "连不上 Pushcut API(%s):检查网络 / HTTPS_PROXY" % type(e).__name__)
+    if TRANSPORT == "pushcut":
+        # Pushcut:key 是否有效 + 账号真实设备名(PUSHCUT_DEVICES 名字不对,发通知会 400)
+        device_names = []
+        try:
+            devs = _doctor_get_json(opener, "https://api.pushcut.io/v1/devices")
+            for d in devs if isinstance(devs, list) else []:
+                n = (d.get("id") or d.get("name")) if isinstance(d, dict) else None
+                device_names.append(str(n if n else d))
+            chk("OK", "Pushcut API 连通,账号设备:%s" % (", ".join(device_names) or "(无)"))
+        except urllib.error.HTTPError as e:
+            chk("FAIL", "Pushcut API 返回 HTTP %d%s"
+                % (e.code, "(PUSHCUT_KEY 无效?)" if e.code in (401, 403) else ""))
+        except Exception as e:
+            chk("FAIL", "连不上 Pushcut API(%s):检查网络 / HTTPS_PROXY" % type(e).__name__)
 
-    if PUSHCUT_DEVICES and device_names:
-        lowered = [n.lower() for n in device_names]
-        unknown = [d for d in PUSHCUT_DEVICES if d.lower() not in lowered]
-        if unknown:
-            chk("FAIL", "PUSHCUT_DEVICES 里这些设备名账号里没有:%s(发通知会 400;改成上面列出的真名)"
-                % ",".join(unknown))
-        else:
-            chk("OK", "PUSHCUT_DEVICES=%s 全部匹配" % ",".join(PUSHCUT_DEVICES))
+        if PUSHCUT_DEVICES and device_names:
+            lowered = [n.lower() for n in device_names]
+            unknown = [d for d in PUSHCUT_DEVICES if d.lower() not in lowered]
+            if unknown:
+                chk("FAIL", "PUSHCUT_DEVICES 里这些设备名账号里没有:%s(发通知会 400;改成上面列出的真名)"
+                    % ",".join(unknown))
+            else:
+                chk("OK", "PUSHCUT_DEVICES=%s 全部匹配" % ",".join(PUSHCUT_DEVICES))
 
-    # Pushcut:云端有没有名为 PUSHCUT_NOTIF 的通知(没有,发通知会 404)
-    try:
-        notifs = _doctor_get_json(opener, "https://api.pushcut.io/v1/notifications")
-        names = []
-        for nobj in notifs if isinstance(notifs, list) else []:
-            if isinstance(nobj, dict):
-                names.extend(str(x) for x in (nobj.get("id"), nobj.get("title")) if x)
-        if PUSHCUT_NOTIF in names:
-            chk("OK", "Pushcut 云端存在通知「%s」" % PUSHCUT_NOTIF)
-        elif names:
-            chk("FAIL", "Pushcut 云端没有名为「%s」的通知(现有:%s)。去 app 里建一条并等同步"
-                % (PUSHCUT_NOTIF, ", ".join(sorted(set(names)))))
-        else:
-            chk("WARN", "通知列表为空或格式未知,跳过此项(若发通知 404 = 名字不对)")
-    except Exception as e:
-        chk("WARN", "列举 Pushcut 通知失败(%s),跳过此项" % type(e).__name__)
+        # Pushcut:云端有没有名为 PUSHCUT_NOTIF 的通知(没有,发通知会 404)
+        try:
+            notifs = _doctor_get_json(opener, "https://api.pushcut.io/v1/notifications")
+            names = []
+            for nobj in notifs if isinstance(notifs, list) else []:
+                if isinstance(nobj, dict):
+                    names.extend(str(x) for x in (nobj.get("id"), nobj.get("title")) if x)
+            if PUSHCUT_NOTIF in names:
+                chk("OK", "Pushcut 云端存在通知「%s」" % PUSHCUT_NOTIF)
+            elif names:
+                chk("FAIL", "Pushcut 云端没有名为「%s」的通知(现有:%s)。去 app 里建一条并等同步"
+                    % (PUSHCUT_NOTIF, ", ".join(sorted(set(names)))))
+            else:
+                chk("WARN", "通知列表为空或格式未知,跳过此项(若发通知 404 = 名字不对)")
+        except Exception as e:
+            chk("WARN", "列举 Pushcut 通知失败(%s),跳过此项" % type(e).__name__)
 
     # ntfy:publish -> poll 回环(doctor 专属临时 topic,不打扰真实通道)
+    def _ntfy_req(url):
+        req = urllib.request.Request(url)
+        if NTFY_TOKEN:
+            req.add_header("Authorization", "Bearer " + NTFY_TOKEN)
+        return req
+
     topic = NTFY_TOPIC + "-doctor-" + os.urandom(4).hex()
     t0 = int(time.time()) - 2
     pub_ok = False
     try:
         with opener.open(
-            NTFY_BASE + urllib.parse.quote(topic, safe="") + "/publish?message=ping", timeout=10
+            _ntfy_req(NTFY_BASE + urllib.parse.quote(topic, safe="") + "/publish?message=ping"),
+            timeout=10,
         ) as r:
             r.read()
         pub_ok = True
@@ -1224,7 +1329,8 @@ def run_doctor():
         for _ in range(3):
             try:
                 with opener.open(
-                    NTFY_BASE + urllib.parse.quote(topic, safe="") + "/json?poll=1&since=" + str(t0),
+                    _ntfy_req(NTFY_BASE + urllib.parse.quote(topic, safe="")
+                              + "/json?poll=1&since=" + str(t0)),
                     timeout=10,
                 ) as r:
                     for ln in r.read().decode("utf-8", "replace").splitlines():
@@ -1245,14 +1351,22 @@ def run_doctor():
         else:
             chk("FAIL", "ntfy publish 成功但订阅读不回(%s):服务端不通或被墙" % NTFY_BASE)
 
-    # 压轴:真发一条测试通知(无按钮)。注意 API「成功」!= 设备收到(token 失效照样返回成功)。
+    # 压轴:真发一条测试通知(无按钮)。注意 API「成功」!= 设备收到。
     try:
-        send_pushcut(opener, "🩺 watch-approve 自检", "看到这条 = Pushcut→设备链路 OK",
-                     with_actions=False, retries=3)
-        chk("OK", "测试通知已发出 -> 看下 iPhone/手表。没收到 = 推送 token 失效,重开 iPhone 上的 Pushcut app")
+        send_notification(opener, "🩺 watch-approve 自检",
+                          "看到这条 = 通知链路 OK(%s)" % TRANSPORT,
+                          with_actions=False, retries=3)
+        if TRANSPORT == "ntfy":
+            chk("OK", "测试通知已发到 topic「%s」-> 看下手机。没收到 = ntfy app 未订阅该 topic / "
+                "没开即时推送 / 被系统省电杀了后台(去电池设置加白名单)" % NTFY_NOTIFY_TOPIC)
+        else:
+            chk("OK", "测试通知已发出 -> 看下 iPhone/手表。没收到 = 推送 token 失效,重开 iPhone 上的 Pushcut app")
     except urllib.error.HTTPError as e:
         extra = ""
-        if e.code == 404:
+        if TRANSPORT == "ntfy":
+            if e.code in (401, 403):
+                extra = "(NTFY_TOKEN 无效或无权限)"
+        elif e.code == 404:
             extra = "(云端没有通知「%s」)" % PUSHCUT_NOTIF
         elif e.code in (401, 403):
             extra = "(PUSHCUT_KEY 无效)"

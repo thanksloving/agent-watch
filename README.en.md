@@ -6,6 +6,7 @@
 
 Routes **Claude Code** and **Codex** approval requests to your **Apple Watch / iPhone**
 with ✅ Allow / ❌ Deny buttons, and pings you when each task finishes — no terminal babysitting.
+**Android / Wear OS / HarmonyOS (compat mode) work too**: one switch moves everything onto ntfy — no Pushcut needed (see "Beyond Apple").
 
 [![CI](https://github.com/ghy196830-del/agent-watch-approve/actions/workflows/ci.yml/badge.svg)](https://github.com/ghy196830-del/agent-watch-approve/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
@@ -61,6 +62,7 @@ with ✅ Allow / ❌ Deny buttons, and pings you when each task finishes — no 
 5. **Wire up**: `python watch_approve.py --print-claude-config` / `--print-codex-config` prints paste-ready snippets with the absolute paths already escaped; merge, restart the agent, test with a risky command.
 
 Details for each step below; if anything misbehaves, run `--doctor` first, then see Troubleshooting.
+(**Android / Wear OS users**: replace step 1 with installing the ntfy app — no Pushcut needed; see "Beyond Apple".)
 
 ## What it does
 
@@ -289,9 +291,12 @@ Override with `PUSHCUT_IMAGE=<url>` (applies to both agents), or `none` to drop 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PUSHCUT_KEY` | — | **Required.** Pushcut API key |
+| `PUSHCUT_KEY` | — | **Required (pushcut transport).** Pushcut API key |
 | `NTFY_TOPIC` | — | **Required.** Return-channel topic (acts as the password) |
 | `PUSHCUT_NOTIF` | `claude` | Name of the Pushcut notification to trigger |
+| `WATCH_TRANSPORT` | `pushcut` | Notification transport: `pushcut` (Apple) / `ntfy` (Android/Wear OS, see "Beyond Apple") |
+| `NTFY_NOTIFY_TOPIC` | — | **Required (ntfy transport).** Notify-channel topic the phone app subscribes to |
+| `NTFY_TOKEN` | — | Token for self-hosted ntfy with auth (publish/subscribe/buttons all carry it) |
 | `HTTPS_PROXY` | — | Outbound proxy, e.g. `http://127.0.0.1:7890` (falls back to `HTTP_PROXY`) |
 | `WATCH_AGENT` | `claude` | `claude` / `codex`; the `--agent` CLI flag wins over this |
 | `WATCH_ENV_FILE` | `watch.env` next to the script | Fallback config file path |
@@ -358,6 +363,56 @@ Override with `PUSHCUT_IMAGE=<url>` (applies to both agents), or `none` to drop 
 - The watch shows only a static frame of animated GIFs (watchOS limitation); the iPhone's expanded
   notification plays the animation.
 
+## 📱 Beyond Apple: Android / Wear OS / HarmonyOS
+
+The only Apple-specific piece in the chain is Pushcut. On Android its role is played by
+**ntfy itself** — the official ntfy Android app natively supports "http" notification actions
+(background GET), the exact equivalent of Pushcut's background web request. One service does
+everything, no second account:
+
+```
+hook → publish to a ntfy notify topic (with buttons) → phone notification → tap = background GET to the reply topic → hook hears it
+```
+
+### Android setup (3 steps)
+
+1. Install the **ntfy app** ([Google Play](https://play.google.com/store/apps/details?id=io.heckel.ntfy) /
+   [F-Droid](https://f-droid.org/packages/io.heckel.ntfy/) — the F-Droid build uses a direct
+   WebSocket connection, **no Google services required**, ideal for GMS-free phones);
+2. Add two lines to `watch.env` (all `PUSHCUT_*` vars become unnecessary):
+   ```
+   WATCH_TRANSPORT=ntfy
+   NTFY_NOTIFY_TOPIC=<another long random string, different from NTFY_TOPIC>
+   ```
+3. Subscribe to `NTFY_NOTIFY_TOPIC` in the app, then run `python watch_approve.py --doctor`
+   (it sends a test notification to your phone).
+
+**Two must-dos**: enable **instant delivery** in the app (foreground service), and whitelist
+ntfy in battery settings — aggressive ROMs (Huawei/Xiaomi/OPPO) kill background apps, which is
+the Android equivalent of Pushcut's stale-token trap. Sound/vibration are configured per topic
+inside the app (approvals are published at urgent priority: pops over the lock screen with
+repeated vibration).
+
+### Watches & HarmonyOS
+
+| Device | Support |
+|--------|---------|
+| **Wear OS** (Pixel/Galaxy/OPPO Watch…) | ✅ phone notifications mirror to the watch **with buttons** — approve from the wrist |
+| **HarmonyOS ≤4.x** (Android-compatible) | ✅ sideload the F-Droid ntfy build, same as above |
+| **Huawei watches** (GT/Watch series) | ⚠️ text-only mirroring, buttons don't carry over — see on watch, approve on phone |
+| **HarmonyOS NEXT** (no Android apps) | ❌ no ntfy client. Fallback: push approvals as a **WeChat message** (e.g. via ServerChan) whose body contains two links to the ntfy `/publish?message=allow\|deny` GET URLs — opening a link completes the approval. Native app PRs welcome |
+
+### ntfy-transport differences
+
+- **3-button limit** (ntfy protocol): approval's Allow/Deny/view-in-terminal fits exactly;
+  for choice questions, 2 options keep the "view in terminal" button, 3 options drop it
+  (timeout still falls back to the terminal), 4 options fall back to a heads-up + terminal;
+- **Self-hosted ntfy with auth is fully supported** (stronger than the Apple side): with
+  `NTFY_TOKEN` set, publish / subscribe / button callbacks all carry `Authorization: Bearer`,
+  and the app supports authenticated subscriptions — something Pushcut buttons cannot do;
+- The image rides along as a ntfy attachment; `PUSHCUT_SOUND` / `PUSHCUT_DEVICES` /
+  Time-Sensitive are Apple-side concepts and are ignored on this transport.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -375,6 +430,8 @@ Override with `PUSHCUT_IMAGE=<url>` (applies to both agents), or `none` to drop 
 | No vibration | `PUSHCUT_SOUND=default` (or `vibrateOnly`) |
 | Chinese/emoji shows as `???` in Windows manual tests | PowerShell pipe encoding artifact, not the hook; real runs are unaffected. Feed JSON from a UTF-8 file or env vars when testing |
 | One tap releases every waiting window | Upgrade to a version with `WATCH_UNIQUE_TOPIC` (on by default); static-action mode (`PUSHCUT_DYNAMIC_ACTIONS=0`) can't isolate — use dynamic actions for multi-window |
+| (Android) ntfy notifications missing/late | Enable instant delivery + whitelist ntfy in battery settings (aggressive ROMs kill it); make sure you subscribed to `NTFY_NOTIFY_TOPIC`, not the reply topic |
+| (Android) question buttons missing | ntfy caps notifications at 3 actions: with 3 options the "view in terminal" button is dropped (timeout still falls back), 4 options fall back to the terminal entirely — by design |
 | Question notification has no "方案X" buttons | Multi-question / multi-select prompts fall back to the terminal by design (the watch only gets a heads-up); only single-question single-select prompts get option buttons. Disable the whole feature with `WATCH_ASK_QUESTIONS=0` |
 
 Every failure path returns "fall back to normal approval" — the agent never hangs because of this hook.

@@ -188,9 +188,18 @@ class TestQuestionParsing(unittest.TestCase):
         self.assertEqual(ui["answers"], {"用哪个方案?": "方案 B:打补丁"})
 
 
-class TestActions(unittest.TestCase):
-    def test_three_buttons_with_quoted_topic(self):
-        acts = wa.build_actions("topic with space")
+class TestButtons(unittest.TestCase):
+    def test_default_buttons_have_terminal_by_default(self):
+        self.assertEqual([m for _, m in wa.default_buttons()], ["allow", "deny", "term"])
+
+    def test_terminal_button_can_be_disabled(self):
+        code = ("import watch_approve as w, sys;"
+                "sys.stdout.write(','.join(m for _, m in w.default_buttons()))")
+        p = run_py(code, env=clean_env(WATCH_TERMINAL_BUTTON="0"))
+        self.assertEqual(p.stdout.decode("utf-8").strip(), "allow,deny", p.stderr)
+
+    def test_pushcut_actions_with_quoted_topic(self):
+        acts = wa._pushcut_actions("topic with space", wa.default_buttons())
         self.assertEqual(len(acts), 3)  # 允许 / 拒绝 / 终端查看(默认开)
         msgs = [a["url"].rsplit("message=", 1)[1] for a in acts]
         self.assertEqual(msgs, ["allow", "deny", "term"])
@@ -198,13 +207,59 @@ class TestActions(unittest.TestCase):
             self.assertTrue(a["url"].startswith("https://ntfy.sh/topic%20with%20space/"), a["url"])
             self.assertEqual(a["urlBackgroundOptions"], {"httpMethod": "GET"})
 
-    def test_terminal_button_can_be_disabled(self):
-        code = (
-            "import watch_approve as w, sys;"
-            "sys.stdout.write(str(len(w.build_actions('t'))))"
-        )
-        p = run_py(code, env=clean_env(WATCH_TERMINAL_BUTTON="0"))
-        self.assertEqual(p.stdout.decode("utf-8").strip(), "2", p.stderr)
+    def test_question_buttons_pushcut_keep_terminal_at_four_options(self):
+        btns = wa.question_buttons(4)
+        self.assertEqual(len(btns), 5)  # 方案A-D + 在终端查看(Pushcut 无 3 按钮限制)
+        self.assertEqual(btns[-1][1], "term")
+
+    def test_ntfy_actions_format(self):
+        acts = wa._ntfy_actions("t", wa.default_buttons())
+        self.assertEqual(len(acts), 3)
+        for a in acts:
+            self.assertEqual(a["action"], "http")
+            self.assertEqual(a["method"], "GET")
+            self.assertTrue(a["clear"])
+            self.assertNotIn("headers", a)  # 未配 NTFY_TOKEN 时不带鉴权头
+
+    def test_ntfy_question_buttons_drop_terminal_at_three_options(self):
+        code = ("import watch_approve as w, sys;"
+                "sys.stdout.write('%d,%d' % (len(w.question_buttons(3)), len(w.question_buttons(2))))")
+        p = run_py(code, env=clean_env(WATCH_TRANSPORT="ntfy"))
+        self.assertEqual(p.stdout.decode("utf-8").strip(), "3,3", p.stderr)
+
+    def test_ntfy_token_adds_auth_header_to_buttons(self):
+        code = ("import watch_approve as w, json, sys;"
+                "sys.stdout.write(json.dumps(w._ntfy_actions('t', w.default_buttons())[0]))")
+        p = run_py(code, env=clean_env(WATCH_TRANSPORT="ntfy", NTFY_TOKEN="tk_x"))
+        a = json.loads(p.stdout.decode("utf-8"))
+        self.assertEqual(a["headers"]["Authorization"], "Bearer tk_x")
+
+
+class TestNtfyTransport(unittest.TestCase):
+    def test_missing_notify_topic_falls_back_to_ask(self):
+        env = clean_env(WATCH_TRANSPORT="ntfy", NTFY_TOPIC="reply-topic-x")
+        p = run_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                      "tool_input": {"command": "rm -rf /tmp/x"}}, env=env)
+        out = out_json(p)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "ask")
+        self.assertIn("NTFY_NOTIFY_TOPIC", out["permissionDecisionReason"])
+
+    def test_danger_only_allow_path_works_on_ntfy(self):
+        env = clean_env(WATCH_TRANSPORT="ntfy", NTFY_NOTIFY_TOPIC="n", NTFY_TOPIC="t",
+                        WATCH_DANGER_ONLY="1", WATCH_NONDANGER_DECISION="allow")
+        p = run_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                      "tool_input": {"command": "echo hello"}}, env=env)
+        out = out_json(p)["hookSpecificOutput"]
+        self.assertEqual(out["permissionDecision"], "allow")
+
+    def test_doctor_reports_ntfy_transport(self):
+        p = subprocess.run([sys.executable, APPROVE, "--doctor"], input=b"",
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           env=clean_env(WATCH_TRANSPORT="ntfy"), cwd=ROOT, timeout=60)
+        self.assertEqual(p.returncode, 1)  # 缺配置,但必须报 ntfy 专属缺项
+        text = p.stdout.decode("utf-8")
+        self.assertIn("transport=ntfy", text)
+        self.assertIn("NTFY_NOTIFY_TOPIC", text)
 
 
 class TestNtfyBase(unittest.TestCase):
