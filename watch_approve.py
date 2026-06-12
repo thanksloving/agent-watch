@@ -123,6 +123,21 @@ PUSHCUT_SOUND = os.environ.get("PUSHCUT_SOUND", "default").strip()
 # 默认开启;设 PUSHCUT_TIME_SENSITIVE=0 可关。
 TIME_SENSITIVE = os.environ.get("PUSHCUT_TIME_SENSITIVE", "1").strip() != "0"
 
+# ---------- AskUserQuestion:把终端里的多选决策框也搬上手表 ----------
+# Claude 有时不是要批准、而是抛一道选择题(AskUserQuestion 工具,在终端渲染成选项框)。
+# 它没有 command/file_path,danger-only 模式会把它当「非危险」静默放行——结果题目只在
+# 终端干等,人不在电脑前任务就卡死。默认把「单问题、单选」的题推到手表:正文 = 问题 +
+# A/B/C/D 选项摘要,按钮 = 方案A.../🖥️ 在终端查看(选项全文太长,按钮只放代号)。
+#   点「方案X」      -> 选择回传给 Claude,按该选项直接继续,终端不再弹框;
+#   点「在终端查看」/ 超时 / 多问题 / 多选题 -> 放行,题目照常在终端弹出,交互不丢。
+# 设 WATCH_ASK_QUESTIONS=0 关闭(回到旧行为:静默放行、只在终端选)。
+ASK_QUESTIONS = os.environ.get("WATCH_ASK_QUESTIONS", "1").strip() != "0"
+QUESTION_TITLE = os.environ.get("WATCH_QUESTION_TITLE", "").strip() or "🤔 Claude 在问你"
+# 选择题通知的声音,和审批区分开(Pushcut 内置音里 "question" 很贴脸;none=不带)。
+QUESTION_SOUND = os.environ.get("WATCH_QUESTION_SOUND", "question").strip()
+_OPT_LETTERS = "ABCD"  # AskUserQuestion 一题最多 4 个选项
+_OPT_LABEL_MAX = 24    # 正文里每个选项标签最多保留的字符数(约手表一行的量)
+
 # ---------- 识别是哪个 agent 在调用:claude(默认)还是 codex ----------
 # 同一份脚本同时服务 Claude Code 和 Codex CLI,两边通知用不同的标题和配图区分。
 # 优先级:命令行 --agent(在 hooks 接线处显式声明,最可靠)> 环境变量 WATCH_AGENT > claude。
@@ -555,24 +570,94 @@ def build_actions(reply_topic):
     ]
 
 
-def send_pushcut(opener, title, text, with_actions=True, retries=None, reply_topic=None):
+def parse_question(tool_input):
+    """AskUserQuestion 的 tool_input -> 手表可处理的「单选题」结构;处理不了返回 None。
+
+    可处理 = 恰好 1 个问题、非 multiSelect、2~4 个选项(工具本身上限就是 4)。
+    多问题 / 多选题一条通知放不下(一块表盘塞不进两道题),交回终端。
+    返回 {"question": 问题文本, "labels": [各选项 label 原文,未截断]}。
+    """
+    if not isinstance(tool_input, dict):
+        return None
+    qs = tool_input.get("questions")
+    if not isinstance(qs, list) or len(qs) != 1 or not isinstance(qs[0], dict):
+        return None
+    q = qs[0]
+    if q.get("multiSelect"):
+        return None
+    opts = q.get("options")
+    if not isinstance(opts, list) or not 2 <= len(opts) <= len(_OPT_LETTERS):
+        return None
+    labels = []
+    for i, o in enumerate(opts):
+        lab = " ".join(str((o if isinstance(o, dict) else {}).get("label") or "").split())
+        labels.append(lab or ("选项%d" % (i + 1)))
+    text = " ".join(str(q.get("question") or "").split()) or "(问题为空)"
+    return {"question": text, "labels": labels}
+
+
+def question_body(q):
+    """选择题通知正文:问题一行 + 每个选项一行「A. label」。
+
+    按钮上只有「方案A/方案B」代号,所以正文必须给出 A/B 对应什么,不然没法盲点;
+    标签超过 _OPT_LABEL_MAX 截断(手表屏幕窄,正文可以滚动但别太啰嗦)。
+    """
+    head = q["question"]
+    if len(head) > DESC_MAX:
+        head = head[: DESC_MAX - 1] + "…"
+    lines = [head]
+    for i, lab in enumerate(q["labels"]):
+        if len(lab) > _OPT_LABEL_MAX:
+            lab = lab[: _OPT_LABEL_MAX - 1] + "…"
+        lines.append("%s. %s" % (_OPT_LETTERS[i], lab))
+    return "\n".join(lines)
+
+
+def build_question_actions(reply_topic, n):
+    """选择题按钮:方案A..方案D + 「🖥️ 在终端查看」,同样全是后台 web 请求(watchOS 限制)。
+
+    点「方案X」后台 publish "optX" 到回执 topic;点「在终端查看」publish "term"
+    (= 放行,让题目在终端正常弹出,适合人就在电脑前的场景)。
+    """
+    base = NTFY_BASE + urllib.parse.quote(reply_topic, safe="") + "/publish?message="
+    acts = [
+        {
+            "name": "方案" + _OPT_LETTERS[i],
+            "url": base + "opt" + _OPT_LETTERS[i],
+            "urlBackgroundOptions": {"httpMethod": "GET"},
+        }
+        for i in range(n)
+    ]
+    acts.append(
+        {"name": "🖥️ 在终端查看", "url": base + "term", "urlBackgroundOptions": {"httpMethod": "GET"}}
+    )
+    return acts
+
+
+def send_pushcut(opener, title, text, with_actions=True, retries=None, reply_topic=None,
+                 actions=None, sound=None):
     """经代理 POST 触发 Pushcut 通知;对瞬时网络/TLS 失败自动重试。
 
     with_actions=False:不带 Allow/Deny 按钮,纯提醒(用于「去终端确认」这种无需回执的通知)。
     reply_topic:按钮 publish 的回执 topic(多窗口下本次审批专属;缺省用基础 topic)。
     retries:本次最多尝试几次(默认用 PUSHCUT_RETRIES);提醒类通知传小一点,避免拖慢终端。
+    actions:直接指定按钮列表(选择题的「方案A/B/...」),非 None 时优先于 with_actions。
+    sound:覆盖本条通知的声音(选择题用 question 音);None = 用全局 PUSHCUT_SOUND。
     4xx(如通知不存在=404、key 无效=401)是配置问题,重试也没用,直接抛出 ->
     上层会 fail-safe 成 ask。
     """
     payload = {"title": title, "text": text}
-    if with_actions:
-        actions = build_actions(reply_topic or NTFY_TOPIC)
-        if actions:
-            payload["actions"] = actions
+    if actions is not None:
+        payload["actions"] = actions
+    elif with_actions:
+        acts = build_actions(reply_topic or NTFY_TOPIC)
+        if acts:
+            payload["actions"] = acts
     if PUSHCUT_DEVICES:
         payload["devices"] = PUSHCUT_DEVICES
-    if PUSHCUT_SOUND and PUSHCUT_SOUND.lower() != "none":
-        payload["sound"] = PUSHCUT_SOUND
+    snd = sound if sound is not None else PUSHCUT_SOUND
+    if snd and snd.lower() != "none":
+        payload["sound"] = snd
     if PUSHCUT_IMAGE and PUSHCUT_IMAGE.lower() != "none":
         payload["image"] = PUSHCUT_IMAGE
     if TIME_SENSITIVE:
@@ -605,9 +690,12 @@ def send_pushcut(opener, title, text, with_actions=True, retries=None, reply_top
         raise last
 
 
-def wait_for_decision(opener, since_ts, deadline, topic=None):
-    """从 ntfy stream 读 allow/deny。读到返回 'allow'/'deny';到 deadline 返回 None。
+def wait_for_decision(opener, since_ts, deadline, topic=None, tokens=None):
+    """从 ntfy stream 读回执。到 deadline 没读到返回 None。
 
+    默认(tokens=None)认审批语义:读到 allow/deny(及同义词)返回 'allow'/'deny'。
+    tokens 非空(选择题)时改认指定 token 集(如 {"opta","optb","term"},全小写),
+    读到集合内的消息原样返回该 token,其余内容忽略。
     topic:本次审批的回执 topic(缺省用基础 topic,兼容旧行为)。
     用 since=since_ts(发通知前记下的 t0)防竞态:即使秒点、回执比订阅先到,
     重连/订阅时 ntfy 会把 t0 之后的消息一并回放,不会漏。
@@ -639,6 +727,10 @@ def wait_for_decision(opener, since_ts, deadline, topic=None):
                 if obj.get("event") != "message":
                     continue  # 只认 message,忽略 open / keepalive
                 msg = (obj.get("message") or "").strip().lower()
+                if tokens is not None:
+                    if msg in tokens:
+                        return msg
+                    continue  # 选择题只认自己的 token,其它内容忽略
                 if msg in ("allow", "approve", "yes", "ok"):
                     return "allow"
                 if msg in ("deny", "block", "no"):
@@ -650,6 +742,90 @@ def wait_for_decision(opener, since_ts, deadline, topic=None):
             except Exception:
                 pass
     return None
+
+
+def _dump_topic(reply_topic):
+    """调试留痕(需 WATCH_DEBUG_DUMP=1):记下本次回执 topic。出问题时可去 ntfy 拉这个
+    topic 的历史(GET /<topic>/json?poll=1&since=...),核对按钮实际发了什么。"""
+    if os.environ.get("WATCH_DEBUG_DUMP", "").strip() == "1":
+        try:
+            import tempfile
+            with open(os.path.join(
+                tempfile.gettempdir(), "watch_approve_last_topic_%s.txt" % AGENT
+            ), "w") as _tf:
+                _tf.write(reply_topic)
+        except Exception:
+            pass
+
+
+def handle_question(data, tool_input):
+    """AskUserQuestion(终端多选决策框)的手表分支。不返回,内部必 emit。
+
+    点「方案X」-> deny + 理由把所选选项回传给 Claude:终端不再弹框,直接按该选项继续。
+    点「在终端查看」/ 超时 / 推送失败 / 配置缺失 / 题型复杂(多问题、多选)-> allow 放行,
+    题目照常在终端弹出 —— 对这个工具 allow 永远无害,它只是让终端选项框正常出现。
+    """
+    if not PUSHCUT_KEY or not NTFY_TOPIC:
+        emit("allow", "watch-approve: 缺少 PUSHCUT_KEY 或 NTFY_TOPIC,选择题改在终端弹出。")
+
+    q = parse_question(tool_input)
+    folder = cwd_label(data) if SHOW_CWD else ""
+    suffix = ("\n📁 " + folder) if folder else ""
+    opener = make_opener()
+
+    # 复杂题型(多问题 / 多选)或没开动态按钮:手表只提醒一声,选择回终端做。
+    if q is None or not DYNAMIC_ACTIONS:
+        first = ""
+        try:
+            first = " ".join(str(tool_input["questions"][0]["question"]).split())
+        except Exception:
+            pass
+        if len(first) > DESC_MAX:
+            first = first[: DESC_MAX - 1] + "…"
+        try:
+            send_pushcut(
+                opener, QUESTION_TITLE,
+                "🖥️ 选项较复杂,请到终端选择" + (("\n" + first) if first else "") + suffix,
+                with_actions=False, retries=5, sound=QUESTION_SOUND,
+            )
+        except Exception:
+            pass
+        emit("allow", "watch-approve: 选择题型较复杂(多问题/多选),已提醒手表,请在终端选择。")
+
+    # 单问题单选:推「方案A/B/.../在终端查看」按钮,等回执。
+    reply_topic = make_reply_topic()
+    _dump_topic(reply_topic)
+    t0 = int(time.time())
+    deadline = time.monotonic() + APPROVE_WAIT
+    try:
+        send_pushcut(
+            opener, QUESTION_TITLE, question_body(q) + suffix,
+            reply_topic=reply_topic, sound=QUESTION_SOUND,
+            actions=build_question_actions(reply_topic, len(q["labels"])),
+        )
+    except Exception:
+        emit("allow", "watch-approve: 选择题推送手表失败,改在终端弹出。")
+
+    tokens = set("opt" + c for c in _OPT_LETTERS.lower()[: len(q["labels"])]) | {"term"}
+    try:
+        choice = wait_for_decision(opener, t0, deadline, reply_topic, tokens=tokens)
+    except Exception:
+        choice = None
+
+    if choice and choice.startswith("opt"):
+        i = _OPT_LETTERS.lower().index(choice[3])
+        emit(
+            "deny",
+            "用户已在手表上回答了这个问题:选择 方案%s「%s」。这就是用户的正式答复,"
+            "请直接按该选项继续执行,不要再用 AskUserQuestion 重复询问这个问题。"
+            % (_OPT_LETTERS[i], q["labels"][i]),
+        )
+    emit(
+        "allow",
+        "watch-approve: %s,选择题改在终端弹出。"
+        % ("已在手表上选择「在终端查看」" if choice == "term"
+           else "%ss 内手表无回应" % APPROVE_WAIT),
+    )
 
 
 def main():
@@ -679,6 +855,12 @@ def main():
     tool_name = data.get("tool_name", "Tool")
     tool_input = data.get("tool_input", {})
     HOOK_EVENT = str(data.get("hook_event_name") or "")
+
+    # 1.5) AskUserQuestion(Claude 的终端多选决策框):专门分支,上手表直接选。
+    #      必须放在 danger-only 之前——它没有 command/file_path,落到后面会被当
+    #      「非危险」静默放行,题目只在终端干等。Codex 没有这个工具,不会进来。
+    if ASK_QUESTIONS and tool_name == "AskUserQuestion" and HOOK_EVENT != "PermissionRequest":
+        handle_question(data, tool_input)  # 内部必 emit,不会返回
 
     # 2) 关键配置缺失 -> ask 退化(不报错卡住)
     if not PUSHCUT_KEY or not NTFY_TOPIC:
@@ -740,17 +922,7 @@ def main():
     # 3) 防竞态:先记 t0,再发通知,订阅用 since=t0。
     #    回执 topic 本次审批专属(多窗口互不串台),按钮和订阅用同一个。
     reply_topic = make_reply_topic()
-    # 调试留痕(需 WATCH_DEBUG_DUMP=1):记下本次回执 topic。出问题时可去 ntfy 拉这个
-    # topic 的历史(GET /<topic>/json?poll=1&since=...),核对按钮实际发的是 allow 还是 deny。
-    if os.environ.get("WATCH_DEBUG_DUMP", "").strip() == "1":
-        try:
-            import tempfile
-            with open(os.path.join(
-                tempfile.gettempdir(), "watch_approve_last_topic_%s.txt" % AGENT
-            ), "w") as _tf:
-                _tf.write(reply_topic)
-        except Exception:
-            pass
+    _dump_topic(reply_topic)
     t0 = int(time.time())
     deadline = time.monotonic() + APPROVE_WAIT
 

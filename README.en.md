@@ -55,10 +55,11 @@ with ✅ Allow / ❌ Deny buttons, and pings you when each task finishes — no 
 ## What it does
 
 1. **⌚ Remote approval** — risky actions (`rm -rf`, `git push --force`, privilege escalation, sandbox escapes…) push a notification with **Allow / Deny** buttons to your watch; your tap flows back to the agent in seconds.
-2. **🔔 Done notifications** — every time the agent finishes a turn, your wrist buzzes "task complete".
-3. **🚦 Usage-limit alerts** — get notified the moment your subscription quota runs out (Claude) or is about to (Codex, ≥90% warning by default), with the reset time; turns killed by API errors alert you too.
-4. **🤖 Autopilot for the rest** — non-risky operations are silently auto-approved (configurable), so the terminal never prompts again.
-5. **🪟 Multi-window safe** — run several projects/windows at once without cross-talk: every approval gets its own reply channel, so a tap resolves only its own request; notifications carry a "📁 project folder" line so you can tell who's asking.
+2. **🤔 Multiple-choice questions on your wrist** — when Claude pops a decision prompt in the terminal ("option A or option B?"), it goes to the watch too, with **Option A / Option B / 🖥️ answer in terminal** buttons; your tap becomes Claude's answer and it keeps working.
+3. **🔔 Done notifications** — every time the agent finishes a turn, your wrist buzzes "task complete".
+4. **🚦 Usage-limit alerts** — get notified the moment your subscription quota runs out (Claude) or is about to (Codex, ≥90% warning by default), with the reset time; turns killed by API errors alert you too.
+5. **🤖 Autopilot for the rest** — non-risky operations are silently auto-approved (configurable), so the terminal never prompts again.
+6. **🪟 Multi-window safe** — run several projects/windows at once without cross-talk: every approval gets its own reply channel, so a tap resolves only its own request; notifications carry a "📁 project folder" line so you can tell who's asking.
 
 Two Python scripts, **standard library only, zero dependencies**, and **fail-safe end to end**: missing config, network failure, or timeout all fall back to the agent's normal in-terminal prompt — your run never hangs.
 
@@ -212,6 +213,24 @@ Running several Claude Code / Codex windows at once? Two things are built in:
 Opt out with `WATCH_UNIQUE_TOPIC=0` (shared topic) and `WATCH_SHOW_CWD=0` (no 📁 line).
 Note: app-configured static actions (`PUSHCUT_DYNAMIC_ACTIONS=0`) point at a fixed topic and can only share it — use the default dynamic actions for multi-window.
 
+## Terminal decision prompts, answered from the watch
+
+Sometimes Claude isn't asking for permission but for a **decision** — the `AskUserQuestion`
+multiple-choice prompt rendered in the terminal. Away from the keyboard, that prompt just sits
+there. Now it reaches your watch too (title "🤔 Claude 在问你"):
+
+- Body = the question plus an `A. / B. / C.` option digest; buttons are kept short —
+  **方案A / 方案B / …** (option codes; full text is in the body) plus **🖥️ answer in terminal**;
+- Tap an option → the choice is fed straight back to Claude, which continues with it (no
+  terminal prompt at all);
+- Tap "answer in terminal" (you're at the desk anyway) or let it time out → the prompt renders
+  in the terminal as usual, nothing is lost;
+- **Multi-question or multi-select prompts** don't fit on a watch face → you get a heads-up
+  notification and the prompt falls through to the terminal.
+
+Set `WATCH_ASK_QUESTIONS=0` to disable (back to terminal-only prompts). The ✅/❌ approval
+flow is unchanged.
+
 ## Per-agent look
 
 One script serves both agents (switch via `--agent codex` or `WATCH_AGENT=codex`):
@@ -258,6 +277,9 @@ Override with `PUSHCUT_IMAGE=<url>` (applies to both agents), or `none` to drop 
 | `WATCH_DESC_MAX` | `80` | Max body length (watch screens are small) |
 | `WATCH_UNIQUE_TOPIC` | `1` | Per-request reply topic (base topic + random suffix) so parallel windows never cross-talk; `0` = shared |
 | `WATCH_SHOW_CWD` | `1` | Append "📁 project folder" to notification bodies to tell windows apart; `0` = off |
+| `WATCH_ASK_QUESTIONS` | `1` | Send Claude's multiple-choice prompts (AskUserQuestion) to the watch; `0` = terminal only |
+| `WATCH_QUESTION_TITLE` | `🤔 Claude 在问你` | Title for question notifications |
+| `WATCH_QUESTION_SOUND` | `question` | Sound for question notifications (distinct from approvals) |
 
 **Look & done-notification**
 
@@ -306,6 +328,7 @@ Override with `PUSHCUT_IMAGE=<url>` (applies to both agents), or `none` to drop 
 | No vibration | `PUSHCUT_SOUND=default` (or `vibrateOnly`) |
 | Chinese/emoji shows as `???` in Windows manual tests | PowerShell pipe encoding artifact, not the hook; real runs are unaffected. Feed JSON from a UTF-8 file or env vars when testing |
 | One tap releases every waiting window | Upgrade to a version with `WATCH_UNIQUE_TOPIC` (on by default); static-action mode (`PUSHCUT_DYNAMIC_ACTIONS=0`) can't isolate — use dynamic actions for multi-window |
+| Question notification has no "方案X" buttons | Multi-question / multi-select prompts fall back to the terminal by design (the watch only gets a heads-up); only single-question single-select prompts get option buttons. Disable the whole feature with `WATCH_ASK_QUESTIONS=0` |
 
 Every failure path returns "fall back to normal approval" — the agent never hangs because of this hook.
 
