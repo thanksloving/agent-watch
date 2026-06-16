@@ -160,6 +160,15 @@ class TestTerminalForced(unittest.TestCase):
             wa.is_terminal_forced("Write", {"file_path": r"C:\u\.claude\settings.json"})
         )
 
+    def test_write_to_global_claude_md_is_forced(self):
+        # ~/.claude/CLAUDE.md 会被 Claude Code 强制弹终端 -> 也该推手表提醒
+        self.assertTrue(
+            wa.is_terminal_forced("Write", {"file_path": r"C:\Users\me\.claude\CLAUDE.md"})
+        )
+        self.assertTrue(
+            wa.is_terminal_forced("Edit", {"file_path": "/home/me/.claude/CLAUDE.md"})
+        )
+
     def test_shell_touching_claude_projects_is_forced(self):
         # shell(New-Item 等)建/写 .claude/projects(含 memory)会被强制弹终端 -> 推提醒
         cmd = r'New-Item -ItemType Directory "C:\u\.claude\projects\P\memory"'

@@ -429,16 +429,17 @@ def is_protected_write(tool_name, tool_input, cwd=""):
 # hook 改变不了「必须去终端点」的事实,但它仍会先触发(#41615:"Hook fires but prompt
 # still shows"),所以能**给手表/手机推一条无按钮提醒**:"去终端确认",让你不至于对着
 # 静默卡住的终端发呆。匹配子串(大小写不敏感,逗号分隔)。
-# 默认只点名 .claude 下的 settings/hooks/skills —— **特意不写成整个 ".claude"**,否则会
-# 误伤 ~/.claude/projects/**/memory/ 里写类工具(Write/Edit)写记忆 .md(根本不弹终端)
-# 和搬出去的 watch-hooks。想加别的强制终端路径用 WATCH_TERMINAL_FORCED_PATHS 覆盖;
-# 设空串则关闭整套提醒(含下面的 shell 专用表)。
+# 默认点名 .claude 下被 Claude Code 写死强制弹终端的文件:settings(.local).json、CLAUDE.md、
+# hooks/、skills/ —— **特意不写成整个 ".claude"**,否则会误伤 ~/.claude/projects/**/memory/
+# 里写类工具(Write/Edit)写记忆 .md 和搬出去的 watch-hooks。想加别的强制终端路径用
+# WATCH_TERMINAL_FORCED_PATHS 覆盖;设空串则关闭整套提醒(含下面的 shell 专用表)。
 TERMINAL_FORCED_PATHS = [
     p.strip().lower()
     for p in os.environ.get(
         "WATCH_TERMINAL_FORCED_PATHS",
         ".claude\\settings.json,.claude/settings.json,"
         ".claude\\settings.local.json,.claude/settings.local.json,"
+        ".claude\\claude.md,.claude/claude.md,"
         ".claude\\hooks,.claude/hooks,"
         ".claude\\skills,.claude/skills",
     ).split(",")
