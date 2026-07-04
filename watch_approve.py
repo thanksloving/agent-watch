@@ -76,7 +76,109 @@ def _load_env_file():
 _load_env_file()
 
 
+# ---------- WebSocket relay client (pure stdlib) ----------
+import re
+
+def _ws_connect_stdlib(url, token, payload, timeout=240):
+    """
+    Pure-stdlib WebSocket client. Connects to WSS URL, sends JSON payload,
+    waits for a 'approval_resolved' message, returns the decision string.
+    Falls back to polling if WS is unavailable.
+    """
+    result = {"decision": None}
+    deadline = time.time() + timeout
+
+    m = re.match(r"wss?://([^/:]+)(:\d+)?(/.*)", url)
+    if not m:
+        return None
+    host, port_m, path = m.group(1), m.group(2), m.group(3)
+    port = int(port_m[1:]) if port_m else (443 if url.startswith("wss") else 80)
+
+    try:
+        raw_sock = socket.create_connection((host, port), timeout=10)
+        if port == 443:
+            ctx = ssl.create_default_context()
+            sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+
+        # WebSocket handshake
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall(
+            f"GET {path}?token={token} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n\r\n".encode()
+        )
+        resp = sock.recv(4096).decode("utf-8", errors="replace")
+        if "101" not in resp.split("\r\n")[0]:
+            sock.close()
+            return None
+
+        # Send JSON payload as WS frame
+        payload_bytes = json.dumps(payload).encode()
+        frame = bytearray([0x81])  # FIN + text frame
+        length = len(payload_bytes)
+        if length < 126:
+            frame.append(0x80 | length)
+        elif length < 65536:
+            frame.append(0xfe)
+            frame.extend(length.to_bytes(2, "big"))
+        else:
+            frame.append(0xff)
+            frame.extend(length.to_bytes(8, "big"))
+        mask = os.urandom(4)
+        frame.append(0x80 | (length if length < 126 else (126 if length < 65536 else 127)))
+        frame.extend(mask)
+        masked = bytearray(payload_bytes)
+        for i in range(len(masked)):
+            masked[i] ^= mask[i % 4]
+        frame.extend(masked)
+        sock.sendall(bytes(frame))
+
+        # Read WS frames until resolved or timeout
+        while time.time() < deadline:
+            sock.settimeout(min(5, deadline - time.time()))
+            try:
+                header = sock.recv(2)
+                if len(header) < 2:
+                    continue
+                opcode = header[0] & 0x0F
+                length = header[1] & 0x7F
+                if opcode == 0x08:  # Close frame
+                    break
+                if opcode == 0x01:  # Text frame
+                    if length < 126:
+                        payload_data = sock.recv(length)
+                    elif length == 126:
+                        ext = sock.recv(2)
+                        length = int.from_bytes(ext, "big")
+                        payload_data = sock.recv(length)
+                    else:
+                        ext = sock.recv(8)
+                        length = int.from_bytes(ext, "big")
+                        payload_data = sock.recv(length)
+                    msg = payload_data.decode("utf-8", errors="replace")
+                    parsed = json.loads(msg)
+                    if parsed.get("type") == "approval_resolved":
+                        result["decision"] = parsed.get("decision")
+                        break
+            except socket.timeout:
+                pass
+            except Exception:
+                pass
+        sock.close()
+    except Exception:
+        pass
+    return result.get("decision")
+
+
 # ---------- 配置:全部来自环境变量 ----------
+RELAY_URL = os.environ.get("WATCH_RELAY_URL", "").strip()
+HOOK_TOKEN = os.environ.get("WATCH_HOOK_TOKEN", "").strip()
+
 PUSHCUT_KEY = os.environ.get("PUSHCUT_KEY", "").strip()
 PUSHCUT_NOTIF = os.environ.get("PUSHCUT_NOTIF", "claude").strip() or "claude"
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
@@ -1129,7 +1231,24 @@ def main():
     if ASK_QUESTIONS and tool_name == "AskUserQuestion" and HOOK_EVENT != "PermissionRequest":
         handle_question(data, tool_input)  # 内部必 emit,不会返回
 
-    # 2) 关键配置缺失 -> ask 退化(不报错卡住)
+    # 2) WebSocket relay path:如果配置了 relay 且有 hook_session_id,通过 WS 等待审批
+    if RELAY_URL and HOOK_TOKEN and "hook_session_id" in data:
+        ws_url = RELAY_URL.rstrip("/") + "/ws/hook"
+        payload = {
+            "type": "approval_request",
+            "tool_name": tool_name,
+            "command": tool_input.get("command", "") if isinstance(tool_input, dict) else "",
+            "hook_session_id": data.get("hook_session_id", ""),
+            "cwd": data.get("cwd", ""),
+        }
+        decision = _ws_connect_stdlib(ws_url, HOOK_TOKEN, payload, timeout=APPROVE_WAIT)
+        if decision:
+            emit(decision, "relay")
+            return
+        # Fall through to fail-safe: emit ask
+        emit("ask", "watch-approve: relay WebSocket 超时/失败,退回正常审批。")
+
+    # 2.5) 关键配置缺失 -> ask 退化(不报错卡住)
     if missing_config():
         emit("ask", "watch-approve: %s,退回正常审批。" % _MISSING_MSG)
 
