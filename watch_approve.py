@@ -1323,6 +1323,7 @@ def main():
         if TRANSPORT == "ntfy":
             hint = "(token 无效/无权限?)" if e.code in (401, 403) else ""
             emit("ask", "watch-approve: ntfy 返回 HTTP %s%s,退回正常审批。" % (e.code, hint))
+            return  # ntfy path — emit() already raised, but be explicit
         hint = ""
         if e.code == 404:
             hint = "(通知 '%s' 不存在?去 Pushcut app 建一条同名通知)" % PUSHCUT_NOTIF

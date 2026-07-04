@@ -4,7 +4,6 @@ import UserNotifications
 class WatchApproveMacAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController!
     private var caffeinateManager: CaffeinateManager!
-    private var localWSServer: LocalWSServer!
     private var relayWSClient: RelayWSClient!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -19,12 +18,7 @@ class WatchApproveMacAppDelegate: NSObject, NSApplicationDelegate {
             self?.handleWatchDecision(approvalId: approvalId, decision: decision)
         }
 
-        localWSServer = LocalWSServer(port: 18792)
-        localWSServer.onApproval = { [weak self] approval in
-            self?.handleIncomingApproval(approval)
-        }
-        localWSServer.start()
-
+        // Connect to VPS relay if configured
         if let relayURL = UserDefaults.standard.string(forKey: "relayURL"), !relayURL.isEmpty {
             relayWSClient = RelayWSClient(relayURL: relayURL)
             relayWSClient.onApproval = { [weak self] approval in

@@ -158,7 +158,14 @@ async def post_approve(approval_id: str, body: DecisionInput):
         if row["status"] != "pending":
             return {"status": "already_resolved", "current": row["status"]}
 
-        # ponytail: CASE WHEN for conditional status update
+        # Verify this device has a token for this approval
+        token_row = await db.execute(
+            "SELECT 1 FROM approval_tokens WHERE approval_id=? AND device_id=?",
+            (approval_id, body.device_id))
+        token_result = await token_row.fetchone()
+        if not token_result:
+            raise HTTPException(403, "Device not authorized for this approval")
+
         await db.execute(
             """UPDATE pending_approvals
                SET status = CASE WHEN ? = 'allow' THEN 'approved' ELSE 'denied' END,
@@ -215,8 +222,12 @@ async def post_unregister(device_token: str = Query(...)):
 
 @app.get("/approvals/active")
 async def get_active(device_token: str = Query(...)):
+    # Verify device is registered
     async with aiosqlite.connect(str(DATABASE_PATH)) as db:
         db.row_factory = aiosqlite.Row
+        row = await db.execute("SELECT 1 FROM devices WHERE id=?", (device_token,)).fetchone()
+        if not row:
+            raise HTTPException(403, "Unknown device")
         rows = await db.execute_fetchall(
             """SELECT pa.* FROM pending_approvals pa
                JOIN approval_tokens at ON at.approval_id = pa.id
@@ -226,8 +237,12 @@ async def get_active(device_token: str = Query(...)):
 
 @app.get("/approvals/history")
 async def get_history(device_token: str = Query(...), limit: int = Query(50)):
+    # Verify device is registered
     async with aiosqlite.connect(str(DATABASE_PATH)) as db:
         db.row_factory = aiosqlite.Row
+        row = await db.execute("SELECT 1 FROM devices WHERE id=?", (device_token,)).fetchone()
+        if not row:
+            raise HTTPException(403, "Unknown device")
         rows = await db.execute_fetchall(
             """SELECT pa.* FROM pending_approvals pa
                JOIN approval_tokens at ON at.approval_id = pa.id

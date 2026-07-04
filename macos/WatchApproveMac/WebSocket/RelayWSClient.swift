@@ -61,6 +61,13 @@ class RelayWSClient: ObservableObject {
                 await DatabaseManager.shared.resolveApproval(id: id, decision: Decision(rawValue: decision) ?? .deny)
                 NotificationCenter.default.post(name: .approvalReceived, object: nil)
             }
+        } else if msg.type == "relay_notification" {
+            // Completion notification from watch_done.py — show as system notification
+            let title = msg.title ?? "任务完成"
+            let body = msg.body ?? ""
+            Task { @MainActor in
+                NotificationManager.shared.showDoneNotification(title: title, body: body)
+            }
         }
     }
 
@@ -89,4 +96,6 @@ struct WSMessage: Codable {
     let hook_session_id: String?
     let created_at: Int?
     let decision: String?
+    let title: String?
+    let body: String?
 }
