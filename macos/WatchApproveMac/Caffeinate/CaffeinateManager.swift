@@ -24,7 +24,7 @@ class CaffeinateManager: ObservableObject {
         let reasonCF = reason as CFString
         let result = IOPMAssertionCreateWithName(
             kIOPMAssertPreventUserIdleSystemSleep as CFString,
-            kIOPMAssertionLevel,
+            kIOPMAssertionLevelOn,
             reasonCF,
             &assertionID
         )

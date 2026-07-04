@@ -25,10 +25,13 @@ class DatabaseManager: @unchecked Sendable {
     func pendingCount() async -> Int {
         await withCheckedContinuation { cont in
             queue.async {
+                var stmt: OpaquePointer?
+                sqlite3_prepare_v2(self.db, "SELECT COUNT(*) FROM approvals WHERE status='pending'", -1, &stmt, nil)
                 var count = 0
-                sqlite3_exec(self.db, "SELECT COUNT(*) FROM approvals WHERE status='pending'", { _, n, vals, _ -> Int32 in
-                    if n > 0, let v = vals { count = Int(sqlite3_column_int64(v, 0)) }; return 0
-                }, nil)
+                if sqlite3_step(stmt) == SQLITE_ROW {
+                    count = Int(sqlite3_column_int64(stmt, 0))
+                }
+                sqlite3_finalize(stmt)
                 cont.resume(returning: count)
             }
         }

@@ -29,10 +29,12 @@ WATCH_TRANSPORT=ntfy 载体(安卓 / Wear OS / 旧鸿蒙):
   * --print-codex-config    打印可直接粘贴的 Codex hooks.json(同上)
 """
 
+import base64
 import json
 import os
 import re
 import socket
+import ssl
 import sys
 import time
 import urllib.error

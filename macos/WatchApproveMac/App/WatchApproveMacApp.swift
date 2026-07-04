@@ -14,6 +14,11 @@ class WatchApproveMacAppDelegate: NSObject, NSApplicationDelegate {
         caffeinateManager = CaffeinateManager()
         menuBarController = MenuBarController(caffeinateManager: caffeinateManager)
 
+        // Wire WatchConnectivity decision callbacks from watch
+        WatchConnectivityManager.shared.onWatchDecision = { [weak self] approvalId, decision in
+            self?.handleWatchDecision(approvalId: approvalId, decision: decision)
+        }
+
         localWSServer = LocalWSServer(port: 18792)
         localWSServer.onApproval = { [weak self] approval in
             self?.handleIncomingApproval(approval)
@@ -34,6 +39,15 @@ class WatchApproveMacAppDelegate: NSObject, NSApplicationDelegate {
             await DatabaseManager.shared.saveApproval(approval)
             NotificationManager.shared.showApprovalNotification(for: approval)
             WatchConnectivityManager.shared.syncApproval(approval)
+            menuBarController.updateBadge()
+            NotificationCenter.default.post(name: .approvalReceived, object: nil)
+        }
+    }
+
+    private func handleWatchDecision(approvalId: String, decision: Decision) {
+        Task {
+            await DatabaseManager.shared.resolveApproval(id: approvalId, decision: decision)
+            RelayWSClient.shared?.notifyDecision(approvalId: approvalId, decision: decision)
             menuBarController.updateBadge()
             NotificationCenter.default.post(name: .approvalReceived, object: nil)
         }
