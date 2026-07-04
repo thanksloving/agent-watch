@@ -1,0 +1,75 @@
+import Foundation
+import SQLite3
+
+actor DatabaseManagerIOS {
+    static let shared = DatabaseManagerIOS()
+    private var db: OpaquePointer?
+
+    private init() { openDB() }
+
+    private func openDB() {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("approvals.sqlite")
+        sqlite3_open(url.path, &db)
+        sqlite3_exec(db, """
+            CREATE TABLE IF NOT EXISTS approvals (
+                id TEXT PRIMARY KEY, tool_name TEXT, command TEXT, hook_session_id TEXT,
+                cwd TEXT, status TEXT, created_at REAL, resolved_at REAL
+            );
+            """, nil, nil, nil)
+    }
+
+    func pendingApprovals() -> [Approval] {
+        var approvals: [Approval] = []
+        var stmt: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT * FROM approvals WHERE status='pending' ORDER BY created_at DESC", -1, &stmt, nil)
+        while sqlite3_step(stmt) == SQLITE_ROW { approvals.append(rowToApproval(stmt)) }
+        sqlite3_finalize(stmt)
+        return approvals
+    }
+
+    func historyApprovals() -> [Approval] {
+        var approvals: [Approval] = []
+        var stmt: OpaquePointer?
+        sqlite3_prepare_v2(db, "SELECT * FROM approvals WHERE status!='pending' ORDER BY created_at DESC LIMIT 100", -1, &stmt, nil)
+        while sqlite3_step(stmt) == SQLITE_ROW { approvals.append(rowToApproval(stmt)) }
+        sqlite3_finalize(stmt)
+        return approvals
+    }
+
+    func save(_ approval: Approval) {
+        var stmt: OpaquePointer?
+        sqlite3_prepare_v2(db, """INSERT OR REPLACE INTO approvals
+            (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?,?,?,?,?,?,?)""",
+            -1, &stmt, nil)
+        sqlite3_bind_text(stmt, 1, approval.id)
+        sqlite3_bind_text(stmt, 2, approval.toolName)
+        sqlite3_bind_text(stmt, 3, approval.command)
+        sqlite3_bind_text(stmt, 4, approval.hookSessionId)
+        sqlite3_bind_text(stmt, 5, approval.cwd)
+        sqlite3_bind_text(stmt, 6, approval.status.rawValue)
+        sqlite3_bind_double(stmt, 7, approval.createdAt.timeIntervalSince1970)
+        sqlite3_step(stmt); sqlite3_finalize(stmt)
+    }
+
+    func resolve(_ id: String, decision: Decision) {
+        var stmt: OpaquePointer?
+        sqlite3_prepare_v2(db, "UPDATE approvals SET status=?, resolved_at=? WHERE id=?", -1, &stmt, nil)
+        sqlite3_bind_text(stmt, 1, decision == .allow ? "approved" : "denied")
+        sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+        sqlite3_bind_text(stmt, 3, id)
+        sqlite3_step(stmt); sqlite3_finalize(stmt)
+    }
+
+    private func rowToApproval(_ stmt: OpaquePointer?) -> Approval {
+        func cs(_ i: Int32) -> String? {
+            guard let p = sqlite3_column_text(stmt, i) else { return nil }
+            return String(cString: p)
+        }
+        return Approval(
+            id: cs(0) ?? "", toolName: cs(1) ?? "", command: cs(2) ?? "",
+            hookSessionId: cs(3) ?? "", cwd: cs(4),
+            status: ApprovalStatus(rawValue: cs(5) ?? "pending") ?? .pending,
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+        )
+    }
+}
