@@ -113,6 +113,21 @@ def verify_hook_token(token: str = Query(...)):
     if not HOOK_TOKEN or token != HOOK_TOKEN:
         raise HTTPException(401, "Invalid hook token")
 
+class NotifyPayload(BaseModel):
+    title: str
+    body: str
+
+@app.post("/notify")
+async def post_notify(body: NotifyPayload, token: str = Query(...)):
+    if not HOOK_TOKEN or token != HOOK_TOKEN:
+        raise HTTPException(401, "Invalid hook token")
+    await manager.broadcast_to_devices({
+        "type": "relay_notification",
+        "title": body.title,
+        "body": body.body
+    })
+    return {"ok": True}
+
 # ---- Routes ----
 
 @app.get("/health")
