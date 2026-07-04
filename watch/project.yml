@@ -1,0 +1,17 @@
+name: WatchApproveWatch
+options:
+  deploymentTarget:
+    watchOS: "10.0"
+targets:
+  WatchApproveWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - path: WatchApproveWatch
+      - path: ../shared
+        group: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.watchapprove.watchkitapp
+        SDKROOT: watchos
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"

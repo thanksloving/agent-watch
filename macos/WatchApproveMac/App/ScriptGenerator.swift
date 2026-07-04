@@ -13,7 +13,7 @@ struct ScriptGenerator {
             set -a; source "$SCRIPT_DIR/watch.env"; set +a
         fi
 
-        exec python3 "$SCRIPT_DIR/watch_approve.py
+        exec python3 "$SCRIPT_DIR/watch_approve.py"
         """
     }
 }
