@@ -2,6 +2,7 @@
 *.local.json
 .env
 *.env
+*.db
 secrets.*
 .claude/settings.json
 .codex/config.toml
