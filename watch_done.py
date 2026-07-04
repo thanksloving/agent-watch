@@ -59,6 +59,11 @@ def _load_env_file():
 _load_env_file()
 
 
+# ---------- Relay 配置 ----------
+RELAY_URL = os.environ.get("WATCH_RELAY_URL", "").strip()
+HOOK_TOKEN = os.environ.get("WATCH_HOOK_TOKEN", "").strip()
+
+
 # ---------- 配置:全部来自环境变量(与审批 hook 共用同一套) ----------
 PUSHCUT_KEY = os.environ.get("PUSHCUT_KEY", "").strip()
 PUSHCUT_NOTIF = os.environ.get("PUSHCUT_NOTIF", "claude").strip() or "claude"
@@ -171,6 +176,22 @@ except ValueError:
 PUSHCUT_URL = "https://api.pushcut.io/v1/notifications/" + urllib.parse.quote(
     PUSHCUT_NOTIF, safe=""
 )
+
+
+def _relay_notify(title, body):
+    """POST completion notification to relay, fire and forget."""
+    if not RELAY_URL or not HOOK_TOKEN:
+        return
+    import urllib.request, json
+    url = RELAY_URL.rstrip("/") + "/notify"
+    data = json.dumps({"title": title, "body": body}).encode()
+    req = urllib.request.Request(url, data=data,
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {HOOK_TOKEN}"})
+    try:
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
 
 
 def make_opener():
@@ -408,6 +429,7 @@ def main():
         folder = cwd_label(data)
         if folder:
             text = (text + "\n📁\u00a0" + folder) if text else "📁\u00a0" + folder
+    _relay_notify(title, text)
     send_notification(make_opener(), title, text, sound)
     # 不输出任何 JSON、正常 exit 0 -> agent 正常结束,不会触发 Stop 循环。
 
