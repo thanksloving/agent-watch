@@ -130,7 +130,6 @@ def _ws_connect_stdlib(url, token, payload, timeout=240):
             frame.append(0xff)
             frame.extend(length.to_bytes(8, "big"))
         mask = os.urandom(4)
-        frame.append(0x80 | (length if length < 126 else (126 if length < 65536 else 127)))
         frame.extend(mask)
         masked = bytearray(payload_bytes)
         for i in range(len(masked)):
