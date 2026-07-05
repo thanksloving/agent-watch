@@ -19,3 +19,7 @@ venv/
 Thumbs.db
 .idea/
 .vscode/
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
