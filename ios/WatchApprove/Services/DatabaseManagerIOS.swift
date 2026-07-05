@@ -10,12 +10,8 @@ actor DatabaseManagerIOS {
     private func openDB() {
         let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("approvals.sqlite")
         sqlite3_open(url.path, &db)
-        sqlite3_exec(db, """
-            CREATE TABLE IF NOT EXISTS approvals (
-                id TEXT PRIMARY KEY, tool_name TEXT, command TEXT, hook_session_id TEXT,
-                cwd TEXT, status TEXT, created_at REAL, resolved_at REAL
-            );
-            """, nil, nil, nil)
+        let sql = "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, tool_name TEXT, command TEXT, hook_session_id TEXT, cwd TEXT, status TEXT, created_at REAL, resolved_at REAL)"
+        sqlite3_exec(db, sql, nil, nil, nil)
     }
 
     func pendingApprovals() -> [Approval] {
@@ -38,9 +34,8 @@ actor DatabaseManagerIOS {
 
     func save(_ approval: Approval) {
         var stmt: OpaquePointer?
-        sqlite3_prepare_v2(db, """INSERT OR REPLACE INTO approvals
-            (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?,?,?,?,?,?,?)""",
-            -1, &stmt, nil)
+        let sql = "INSERT OR REPLACE INTO approvals (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?,?,?,?,?,?,?)"
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         sqlite3_bind_text(stmt, 1, approval.id)
         sqlite3_bind_text(stmt, 2, approval.toolName)
         sqlite3_bind_text(stmt, 3, approval.command)
@@ -53,7 +48,8 @@ actor DatabaseManagerIOS {
 
     func resolve(_ id: String, decision: Decision) {
         var stmt: OpaquePointer?
-        sqlite3_prepare_v2(db, "UPDATE approvals SET status=?, resolved_at=? WHERE id=?", -1, &stmt, nil)
+        let sql = "UPDATE approvals SET status=?, resolved_at=? WHERE id=?"
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
         sqlite3_bind_text(stmt, 1, decision == .allow ? "approved" : "denied")
         sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
         sqlite3_bind_text(stmt, 3, id)
@@ -69,7 +65,6 @@ actor DatabaseManagerIOS {
             id: cs(0) ?? "", toolName: cs(1) ?? "", command: cs(2) ?? "",
             hookSessionId: cs(3) ?? "", cwd: cs(4),
             status: ApprovalStatus(rawValue: cs(5) ?? "pending") ?? .pending,
-            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
-        )
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)))
     }
 }
