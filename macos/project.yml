@@ -36,3 +36,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.watchapprove.macos
         INFOPLIST_FILE: WatchApproveMac/Resources/Info.plist
         CODE_SIGN_ENTITLEMENTS: WatchApproveMac/Resources/WatchApprove.entitlements
+    dependencies:
+      - framework: WatchConnectivity.framework
+        implicit: true
+      - sdk: libsqlite3.tbd
+        implicit: true

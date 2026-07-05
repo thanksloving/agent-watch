@@ -18,3 +18,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.watchapprove.ios
+    dependencies:
+      - sdk: libsqlite3.tbd
+        implicit: true
+      - framework: WatchConnectivity.framework
+        implicit: true

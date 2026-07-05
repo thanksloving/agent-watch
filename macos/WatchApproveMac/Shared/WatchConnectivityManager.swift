@@ -1,21 +1,28 @@
 import Foundation
+#if canImport(WatchConnectivity)
 import WatchConnectivity
+#endif
 
 class WatchConnectivityManager: NSObject, WCSessionDelegate {
     static let shared = WatchConnectivityManager()
+    #if canImport(WatchConnectivity)
     private var session: WCSession?
+    #endif
     var onWatchDecision: ((String, Decision) -> Void)?
 
     private override init() {
         super.init()
+        #if canImport(WatchConnectivity)
         if WCSession.isSupported() {
             session = WCSession.default
             session?.delegate = self
             session?.activate()
         }
+        #endif
     }
 
     func syncApproval(_ approval: Approval) {
+        #if canImport(WatchConnectivity)
         guard let session = session, session.isReachable else { return }
         let dict: [String: Any] = [
             "id": approval.id,
@@ -24,21 +31,21 @@ class WatchConnectivityManager: NSObject, WCSessionDelegate {
             "status": approval.status.rawValue
         ]
         session.sendMessage(["type": "approval", "approval": dict], replyHandler: nil)
+        #endif
     }
 
     // MARK: - WCSessionDelegate
 
+    #if canImport(WatchConnectivity)
     func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: Error?) {}
 
     func sessionDidBecomeInactive(_ session: WCSession) {}
 
     func sessionDidDeactivate(_ session: WCSession) {
-        // Required by WCSessionDelegate when used with iOS
         session.activate()
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        // Receive messages from watch (e.g., approval responses)
         DispatchQueue.main.async {
             if message["type"] as? String == "approval_response",
                let approvalId = message["approvalId"] as? String,
@@ -48,4 +55,5 @@ class WatchConnectivityManager: NSObject, WCSessionDelegate {
             }
         }
     }
+    #endif
 }

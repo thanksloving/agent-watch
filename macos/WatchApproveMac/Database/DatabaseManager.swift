@@ -54,9 +54,8 @@ class DatabaseManager: @unchecked Sendable {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
                 var stmt: OpaquePointer?
-                sqlite3_prepare_v2(self.db, """INSERT OR REPLACE INTO approvals
-                    (id, tool_name, command, hook_session_id, cwd, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""", -1, &stmt, nil)
+                let sql = "INSERT OR REPLACE INTO approvals (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                sqlite3_prepare_v2(self.db, sql, -1, &stmt, nil)
                 sqlite3_bind_text(stmt, 1, approval.id)
                 sqlite3_bind_text(stmt, 2, approval.toolName)
                 sqlite3_bind_text(stmt, 3, approval.command)
@@ -74,7 +73,8 @@ class DatabaseManager: @unchecked Sendable {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
                 var stmt: OpaquePointer?
-                sqlite3_prepare_v2(self.db, """UPDATE approvals SET status=?, resolved_at=? WHERE id=?""", -1, &stmt, nil)
+                let sql = "UPDATE approvals SET status=?, resolved_at=? WHERE id=?"
+                sqlite3_prepare_v2(self.db, sql, -1, &stmt, nil)
                 sqlite3_bind_text(stmt, 1, decision == .allow ? "approved" : "denied")
                 sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
                 sqlite3_bind_text(stmt, 3, id)
