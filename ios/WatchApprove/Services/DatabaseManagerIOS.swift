@@ -36,12 +36,12 @@ actor DatabaseManagerIOS {
         var stmt: OpaquePointer?
         let sql = "INSERT OR REPLACE INTO approvals (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?,?,?,?,?,?,?)"
         sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-        sqlite3_bind_text(stmt, 1, approval.id)
-        sqlite3_bind_text(stmt, 2, approval.toolName)
-        sqlite3_bind_text(stmt, 3, approval.command)
-        sqlite3_bind_text(stmt, 4, approval.hookSessionId)
-        sqlite3_bind_text(stmt, 5, approval.cwd)
-        sqlite3_bind_text(stmt, 6, approval.status.rawValue)
+        approval.id.withCString { p in sqlite3_bind_text(stmt, 1, p, -1, nil) }
+        approval.toolName.withCString { p in sqlite3_bind_text(stmt, 2, p, -1, nil) }
+        approval.command.withCString { p in sqlite3_bind_text(stmt, 3, p, -1, nil) }
+        approval.hookSessionId.withCString { p in sqlite3_bind_text(stmt, 4, p, -1, nil) }
+        (approval.cwd ?? "").withCString { p in sqlite3_bind_text(stmt, 5, p, -1, nil) }
+        approval.status.rawValue.withCString { p in sqlite3_bind_text(stmt, 6, p, -1, nil) }
         sqlite3_bind_double(stmt, 7, approval.createdAt.timeIntervalSince1970)
         sqlite3_step(stmt); sqlite3_finalize(stmt)
     }
@@ -50,9 +50,10 @@ actor DatabaseManagerIOS {
         var stmt: OpaquePointer?
         let sql = "UPDATE approvals SET status=?, resolved_at=? WHERE id=?"
         sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
-        sqlite3_bind_text(stmt, 1, decision == .allow ? "approved" : "denied")
+        let statusStr = decision == .allow ? "approved" : "denied"
+        statusStr.withCString { p in sqlite3_bind_text(stmt, 1, p, -1, nil) }
         sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
-        sqlite3_bind_text(stmt, 3, id)
+        id.withCString { p in sqlite3_bind_text(stmt, 3, p, -1, nil) }
         sqlite3_step(stmt); sqlite3_finalize(stmt)
     }
 
