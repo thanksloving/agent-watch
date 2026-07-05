@@ -26,7 +26,7 @@ class NotificationManager: NSObject {
         content.subtitle = approval.toolName
         content.categoryIdentifier = "APPROVAL"
         content.userInfo = ["approvalId": approval.id]
-        content.interruptionLevel = .timeSensitive
+        content.interruptionLevel = .active
         content.relevanceScore = 100
         content.sound = .default
         let request = UNNotificationRequest(identifier: approval.id, content: content, trigger: nil)

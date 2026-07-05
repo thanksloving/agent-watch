@@ -2,8 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "...">
 <plist version="1.0">
 <dict>
-    <key>com.apple.developer.usernotifications.time-sensitive</key>
-    <true/>
     <key>com.apple.developer.pushkit.unrestricted</key>
     <true/>
     <key>com.apple.security.app-sandbox</key>
