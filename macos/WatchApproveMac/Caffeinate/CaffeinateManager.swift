@@ -8,7 +8,7 @@ extension Notification.Name {
 
 class CaffeinateManager: ObservableObject {
     @Published private(set) var isActive: Bool = false
-    private var assertionID: IOPMAssertionID = 0
+    private var assertionID: UInt32 = 0
     private var scheduledTimer: Timer?
     private var rules: [AntiSleepRule] = []
 
