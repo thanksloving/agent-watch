@@ -39,7 +39,5 @@ targets:
     dependencies:
       - sdk: WatchConnectivity.framework
         implicit: true
-      - sdk: IOKit.framework
-        implicit: true
       - sdk: libsqlite3.tbd
         implicit: true

@@ -1,5 +1,4 @@
 import Foundation
-import IOKit
 import Combine
 
 extension Notification.Name {
@@ -8,7 +7,7 @@ extension Notification.Name {
 
 class CaffeinateManager: ObservableObject {
     @Published private(set) var isActive: Bool = false
-    private var assertionID: UInt32 = 0
+    private var caffeinatePID: pid_t = 0
     private var scheduledTimer: Timer?
     private var rules: [AntiSleepRule] = []
 
@@ -21,23 +20,20 @@ class CaffeinateManager: ObservableObject {
 
     func prevent(reason: String = "WatchApprove Pro") {
         guard !isActive else { return }
-        let reasonCF = reason as CFString
-        let result = IOPMAssertionCreateWithName(
-            kIOPMAssertPreventUserIdleSystemSleep as CFString,
-            kIOPMAssertionLevelOn,
-            reasonCF,
-            &assertionID
-        )
-        if result == kIOReturnSuccess {
-            isActive = true
-            NotificationCenter.default.post(name: .caffeinateChanged, object: nil)
-        }
+        // caffeinate -s (system), -m (prevent disk idle), -i (prevent idle sleep), -t 0 (no timeout = kill to release)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        task.arguments = ["-s", "-m", "-i", "-t", "0"]
+        task.launch()
+        caffeinatePID = task.processIdentifier
+        isActive = true
+        NotificationCenter.default.post(name: .caffeinateChanged, object: nil)
     }
 
     func release() {
-        guard isActive else { return }
-        IOPMAssertionRelease(assertionID)
-        assertionID = 0
+        guard isActive, caffeinatePID != 0 else { return }
+        kill(caffeinatePID, SIGTERM)
+        caffeinatePID = 0
         isActive = false
         NotificationCenter.default.post(name: .caffeinateChanged, object: nil)
     }
