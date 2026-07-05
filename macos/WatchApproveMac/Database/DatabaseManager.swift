@@ -13,12 +13,7 @@ class DatabaseManager: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         let dbPath = url.appendingPathComponent("approvals.sqlite").path
         if sqlite3_open(dbPath, &db) != SQLITE_OK { print("Failed to open DB") }
-        let createSQL = """
-        CREATE TABLE IF NOT EXISTS approvals (
-            id TEXT PRIMARY KEY, tool_name TEXT, command TEXT, hook_session_id TEXT,
-            cwd TEXT, status TEXT, created_at REAL, resolved_at REAL
-        );
-        """
+        let createSQL = "CREATE TABLE IF NOT EXISTS approvals (id TEXT PRIMARY KEY, tool_name TEXT, command TEXT, hook_session_id TEXT, cwd TEXT, status TEXT, created_at REAL, resolved_at REAL)"
         sqlite3_exec(db, createSQL, nil, nil, nil)
     }
 
@@ -56,12 +51,12 @@ class DatabaseManager: @unchecked Sendable {
                 var stmt: OpaquePointer?
                 let sql = "INSERT OR REPLACE INTO approvals (id, tool_name, command, hook_session_id, cwd, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
                 sqlite3_prepare_v2(self.db, sql, -1, &stmt, nil)
-                sqlite3_bind_text(stmt, 1, approval.id)
-                sqlite3_bind_text(stmt, 2, approval.toolName)
-                sqlite3_bind_text(stmt, 3, approval.command)
-                sqlite3_bind_text(stmt, 4, approval.hookSessionId)
-                sqlite3_bind_text(stmt, 5, approval.cwd)
-                sqlite3_bind_text(stmt, 6, approval.status.rawValue)
+                approval.id.withCString { p in sqlite3_bind_text(stmt, 1, p, -1, nil) }
+                approval.toolName.withCString { p in sqlite3_bind_text(stmt, 2, p, -1, nil) }
+                approval.command.withCString { p in sqlite3_bind_text(stmt, 3, p, -1, nil) }
+                approval.hookSessionId.withCString { p in sqlite3_bind_text(stmt, 4, p, -1, nil) }
+                (approval.cwd ?? "").withCString { p in sqlite3_bind_text(stmt, 5, p, -1, nil) }
+                approval.status.rawValue.withCString { p in sqlite3_bind_text(stmt, 6, p, -1, nil) }
                 sqlite3_bind_double(stmt, 7, approval.createdAt.timeIntervalSince1970)
                 sqlite3_step(stmt); sqlite3_finalize(stmt)
                 cont.resume()
@@ -75,9 +70,10 @@ class DatabaseManager: @unchecked Sendable {
                 var stmt: OpaquePointer?
                 let sql = "UPDATE approvals SET status=?, resolved_at=? WHERE id=?"
                 sqlite3_prepare_v2(self.db, sql, -1, &stmt, nil)
-                sqlite3_bind_text(stmt, 1, decision == .allow ? "approved" : "denied")
+                let statusStr = decision == .allow ? "approved" : "denied"
+                statusStr.withCString { p in sqlite3_bind_text(stmt, 1, p, -1, nil) }
                 sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
-                sqlite3_bind_text(stmt, 3, id)
+                id.withCString { p in sqlite3_bind_text(stmt, 3, p, -1, nil) }
                 sqlite3_step(stmt); sqlite3_finalize(stmt)
                 cont.resume()
             }
@@ -93,7 +89,6 @@ class DatabaseManager: @unchecked Sendable {
             id: cs(0) ?? "", toolName: cs(1) ?? "", command: cs(2) ?? "",
             hookSessionId: cs(3) ?? "", cwd: cs(4),
             status: ApprovalStatus(rawValue: cs(5) ?? "pending") ?? .pending,
-            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
-        )
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)))
     }
 }
