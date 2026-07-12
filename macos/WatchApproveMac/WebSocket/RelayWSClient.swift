@@ -87,15 +87,3 @@ class RelayWSClient: ObservableObject {
         UserDefaults.standard.set(t, forKey: "deviceToken"); return t
     }
 }
-
-struct WSMessage: Codable {
-    let type: String
-    let approval_id: String?
-    let tool_name: String?
-    let command: String?
-    let hook_session_id: String?
-    let created_at: Int?
-    let decision: String?
-    let title: String?
-    let body: String?
-}

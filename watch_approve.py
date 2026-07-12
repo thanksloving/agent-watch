@@ -177,8 +177,8 @@ def _ws_connect_stdlib(url, token, payload, timeout=240):
 
 
 # ---------- 配置:全部来自环境变量 ----------
-RELAY_URL = os.environ.get("WATCH_RELAY_URL", "").strip()
-HOOK_TOKEN = os.environ.get("WATCH_HOOK_TOKEN", "").strip()
+RELAY_URL = (os.environ.get("WATCH_RELAY_URL") or os.environ.get("RELAY_URL") or "").strip()
+HOOK_TOKEN = (os.environ.get("WATCH_HOOK_TOKEN") or os.environ.get("HOOK_TOKEN") or "").strip()
 
 PUSHCUT_KEY = os.environ.get("PUSHCUT_KEY", "").strip()
 PUSHCUT_NOTIF = os.environ.get("PUSHCUT_NOTIF", "claude").strip() or "claude"

@@ -1,9 +1,13 @@
 # tests/test_relay.py
-import pytest, sys, os
+import pytest, sys, os, tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "relay"))
 
 os.environ["WATCH_APPROVE_HOOK_TOKEN"] = "test-hook-token"
+TEST_DB = Path(tempfile.gettempdir()) / f"watchapprove-test-{os.getpid()}.db"
+if TEST_DB.exists():
+    TEST_DB.unlink()
+os.environ["WATCH_APPROVE_DB"] = str(TEST_DB)
 
 from fastapi.testclient import TestClient
 from relay.main import app
@@ -42,6 +46,14 @@ def test_create_approval_requires_auth(client):
     assert r.status_code == 401
 
 def test_create_approval_with_auth(client):
+    device_id = "test-device-create"
+    r = client.post("/register", json={
+        "device_token": device_id,
+        "platform": "ios",
+        "apns_token": "apns-test-token"
+    })
+    assert r.status_code == 200
+
     r = client.post("/approval?token=test-hook-token", json={
         "tool_name": "Bash",
         "command": "echo hello",
@@ -53,20 +65,22 @@ def test_create_approval_with_auth(client):
     assert "approval_id" in data
     approval_id = data["approval_id"]
 
-    # Fetch active approvals for a device (not yet linked, so empty)
-    r = client.get("/approvals/active?device_token=test-device-001")
+    # Fetch active approvals for the linked device.
+    r = client.get(f"/approvals/active?device_token={device_id}")
     assert r.status_code == 200
-    assert isinstance(r.json(), list)
+    active = r.json()
+    assert len(active) == 1
+    assert active[0]["id"] == approval_id
 
     # Approve the pending approval
     r = client.post(f"/approve/{approval_id}", json={
         "decision": "allow",
-        "device_id": "test-device-001"
+        "device_id": device_id
     })
     assert r.status_code == 200
 
     # History should show the resolved approval
-    r = client.get("/approvals/history?device_token=test-device-001")
+    r = client.get(f"/approvals/history?device_token={device_id}")
     assert r.status_code == 200
     history = r.json()
     assert len(history) == 1
@@ -80,6 +94,13 @@ def test_approve_nonexistent(client):
     assert r.status_code == 404
 
 def test_approve_already_resolved(client):
+    device_id = "test-device-resolved"
+    r = client.post("/register", json={
+        "device_token": device_id,
+        "platform": "ios"
+    })
+    assert r.status_code == 200
+
     # Create approval
     r = client.post("/approval?token=test-hook-token", json={
         "tool_name": "Bash",
@@ -91,14 +112,41 @@ def test_approve_already_resolved(client):
     # First approval
     r = client.post(f"/approve/{approval_id}", json={
         "decision": "allow",
-        "device_id": "test-device-001"
+        "device_id": device_id
     })
     assert r.status_code == 200
 
     # Second approval attempt
     r = client.post(f"/approve/{approval_id}", json={
         "decision": "deny",
-        "device_id": "test-device-001"
+        "device_id": device_id
     })
     assert r.status_code == 200
     assert r.json()["status"] == "already_resolved"
+
+def test_hook_websocket_round_trip(client):
+    with client.websocket_connect("/ws/device/test-device-ws?platform=macos") as device_ws:
+        with client.websocket_connect("/ws/hook?token=test-hook-token") as hook_ws:
+            hook_ws.send_json({
+                "type": "approval_request",
+                "tool_name": "Bash",
+                "command": "git push --force",
+                "hook_session_id": "sess-ws"
+            })
+
+            pending = device_ws.receive_json()
+            assert pending["type"] == "new_approval"
+            assert pending["command"] == "git push --force"
+
+            r = client.post(f"/approve/{pending['approval_id']}", json={
+                "decision": "allow",
+                "device_id": "test-device-ws"
+            })
+            assert r.status_code == 200
+
+            resolved = hook_ws.receive_json()
+            assert resolved == {
+                "type": "approval_resolved",
+                "approval_id": pending["approval_id"],
+                "decision": "allow"
+            }

@@ -22,6 +22,9 @@ class WatchConnectivityServiceWatch: NSObject, ObservableObject {
 }
 
 extension WatchConnectivityServiceWatch: WCSessionDelegate {
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+    }
+
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
         DispatchQueue.main.async {
             if message["type"] as? String == "approval", let dict = message["approval"] as? [String: Any] {

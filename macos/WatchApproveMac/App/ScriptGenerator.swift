@@ -5,8 +5,8 @@ struct ScriptGenerator {
         """
         #!/bin/bash
         # WatchApprove Pro — Claude Code PreToolUse hook
-        RELAY_URL="\(relayURL)"
-        HOOK_TOKEN="\(hookToken)"
+        WATCH_RELAY_URL="\(relayURL)"
+        WATCH_HOOK_TOKEN="\(hookToken)"
         SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
         if [ -f "$SCRIPT_DIR/watch.env" ]; then

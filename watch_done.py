@@ -60,8 +60,8 @@ _load_env_file()
 
 
 # ---------- Relay 配置 ----------
-RELAY_URL = os.environ.get("WATCH_RELAY_URL", "").strip()
-HOOK_TOKEN = os.environ.get("WATCH_HOOK_TOKEN", "").strip()
+RELAY_URL = (os.environ.get("WATCH_RELAY_URL") or os.environ.get("RELAY_URL") or "").strip()
+HOOK_TOKEN = (os.environ.get("WATCH_HOOK_TOKEN") or os.environ.get("HOOK_TOKEN") or "").strip()
 
 
 # ---------- 配置:全部来自环境变量(与审批 hook 共用同一套) ----------
